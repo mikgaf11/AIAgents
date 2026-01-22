@@ -5,6 +5,11 @@ TagManager:
   serializedVersion: 2
   tags:
   - Guard
+  - Gladiator
+  - Stratagist
+  - AmmoCrate
+  - HealthPack
+  - Strategist
   layers:
   - Default
   - TransparentFX
