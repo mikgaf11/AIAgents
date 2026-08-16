@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>JARVIS</title>
+<link rel="stylesheet" href="/css/hud.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='34' fill='none' stroke='%2338e1ff' stroke-width='6'/><circle cx='50' cy='50' r='12' fill='%2338e1ff'/></svg>" />
+</head>
+<body data-state="idle">
+
+  <!-- the neural core, full-bleed behind everything -->
+  <canvas id="brain-canvas"></canvas>
+  <canvas id="hud-canvas"></canvas>
+  <div class="vignette"></div>
+
+  <!-- top bar -->
+  <header class="hud-bar">
+    <div class="brand">
+      <span id="state-dot" class="dot" data-state="idle"></span>
+      <span class="wordmark">J A R V I S</span>
+      <span class="sub">just a rather very intelligent system</span>
+    </div>
+    <div class="readouts">
+      <span class="readout"><b id="state-label">IDLE</b></span>
+      <span class="readout"><i>core</i><b id="stat-model">—</b></span>
+      <span class="readout"><i>latency</i><b id="stat-latency">—</b></span>
+      <span class="readout"><i>throughput</i><b id="stat-rate">—</b></span>
+      <span class="readout"><i>tokens</i><b id="stat-tokens">—</b></span>
+      <span class="readout"><i>render</i><b id="stat-fps">—</b></span>
+      <span class="readout"><i>neurons·synapses</i><b id="stat-neurons">—</b></span>
+    </div>
+  </header>
+
+  <!-- left column -->
+  <aside class="panel-column left">
+    <section class="panel">
+      <h2>System Vitals</h2>
+      <div id="vitals" class="vitals"></div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Cognition Stream <span id="mood-label" class="tag">CALM</span></h2>
+      <div id="thought-stream" class="stream thoughts"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Active Objectives</h2>
+      <div id="goal-list" class="goals"></div>
+    </section>
+  </aside>
+
+  <!-- right column -->
+  <aside class="panel-column right">
+    <section class="panel grow">
+      <h2>Tool Trace</h2>
+      <div id="tool-trace" class="stream tools"></div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Memory I/O</h2>
+      <div id="memory-stream" class="stream memory"></div>
+    </section>
+  </aside>
+
+  <!-- conversation + composer -->
+  <main class="console">
+    <div id="transcript" class="transcript"></div>
+    <div id="interim" class="interim"></div>
+    <div class="composer">
+      <button id="mic-button" class="icon-button" title="Toggle microphone (Space)">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"
+                fill="currentColor"/>
+          <path d="M5 11a7 7 0 0 0 14 0M12 18v3" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span id="mic-label">MIC OFF</span>
+      </button>
+
+      <input id="composer-input" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Speak, or type a command…" />
+
+      <button id="composer-send" class="send-button" title="Send">SEND</button>
+
+      <button id="speaker-button" class="icon-button" title="Voice output active">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+          <path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"
+                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+
+      <label class="wake-toggle" title="Require the wake word before acting">
+        <input id="wake-toggle" type="checkbox" />
+        <span>WAKE WORD</span>
+      </label>
+    </div>
+  </main>
+
+  <div id="banner" class="banner"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
