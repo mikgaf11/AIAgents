@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,19 +13,25 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .autonomy import Autonomy
 from .cognition import Cognition
 from .config import CONFIG, PROJECT_ROOT
+from .connectors import email as email_connector
 from .core import Jarvis
 from .events import BUS
 from .memory import Memory
 from .tools import ToolRegistry
+from .triage import TriageEngine
 
 WEB_DIR = PROJECT_ROOT / "web"
 
 memory = Memory(CONFIG.db_path)
-tools = ToolRegistry(memory)
+connector = email_connector.from_config(CONFIG)
+tools = ToolRegistry(memory, connector)
 jarvis = Jarvis(memory, tools)
-cognition = Cognition(jarvis)
+triage = TriageEngine(memory, connector, jarvis.client)
+autonomy = Autonomy(jarvis, triage)
+cognition = Cognition(jarvis, autonomy)
 
 
 @contextlib.asynccontextmanager
@@ -37,7 +44,22 @@ async def lifespan(_: FastAPI):
         online=jarvis.online,
         model=CONFIG.model if jarvis.online else "offline",
         safe_mode=CONFIG.safe_mode,
+        email=triage.status(),
     )
+    if connector is not None and jarvis.online:
+        # Verify the mailbox once at boot so a bad password surfaces now
+        # rather than silently failing every poll.
+        async def check_mail() -> None:
+            probe = await connector.probe()
+            BUS.emit(
+                "email_status",
+                ok=bool(probe.get("ok")),
+                detail=probe.get("error") or f"{connector.address} reachable",
+            )
+            if not probe.get("ok"):
+                BUS.emit("error", message=f"Email: {probe.get('error')}")
+
+        asyncio.create_task(check_mail())
     try:
         yield
     finally:
@@ -97,6 +119,120 @@ async def force_tick() -> JSONResponse:
     """Run one reflection pass now instead of waiting for the timer."""
     await cognition.tick()
     return JSONResponse({"ok": True, "ticks": cognition.ticks, "mood": cognition.mood})
+
+
+# -- email ---------------------------------------------------------------
+
+
+@app.get("/api/inbox")
+async def inbox() -> JSONResponse:
+    return JSONResponse(
+        {
+            "email": triage.status(),
+            "messages": await memory.list_emails(limit=40, unhandled_only=False),
+            "drafts": await memory.list_drafts("pending"),
+        }
+    )
+
+
+@app.post("/api/email/sweep")
+async def sweep_now() -> JSONResponse:
+    """Check mail immediately instead of waiting for the poll interval."""
+    if not triage.enabled:
+        return JSONResponse(
+            {"ok": False, "error": "email is not configured"}, status_code=400
+        )
+    records = await triage.sweep()
+    return JSONResponse({"ok": True, "triaged": len(records)})
+
+
+@app.post("/api/email/handled/{email_id}")
+async def mark_handled(email_id: int) -> JSONResponse:
+    return JSONResponse({"ok": await memory.mark_email_handled(email_id)})
+
+
+@app.post("/api/draft/{draft_id}/{decision}")
+async def decide_draft(draft_id: int, decision: str) -> JSONResponse:
+    """Approve or discard an outbound draft.
+
+    Approval is the only path by which anything JARVIS wrote ever leaves the
+    machine, and it always originates from a click here.
+    """
+    if decision not in ("approve", "discard"):
+        return JSONResponse({"error": "decision must be approve or discard"},
+                            status_code=400)
+
+    draft = await memory.get_draft(draft_id)
+    if draft is None:
+        return JSONResponse({"error": f"no draft #{draft_id}"}, status_code=404)
+    if draft["status"] != "pending":
+        return JSONResponse(
+            {"error": f"draft #{draft_id} is already {draft['status']}"},
+            status_code=409,
+        )
+
+    if decision == "discard":
+        await memory.set_draft_status(draft_id, "discarded")
+        BUS.emit("draft", id=draft_id, status="discarded")
+        return JSONResponse({"ok": True, "status": "discarded"})
+
+    if not CONFIG.email_allow_send:
+        return JSONResponse(
+            {
+                "error": "sending is disabled. Set JARVIS_EMAIL_ALLOW_SEND=1 in"
+                         " jarvis/.env and restart to enable it."
+            },
+            status_code=403,
+        )
+    if connector is None or not connector.configured:
+        return JSONResponse({"error": "email is not configured"}, status_code=400)
+
+    try:
+        await connector.send(draft["to_addr"], draft["subject"], draft["body"])
+    except Exception as exc:  # noqa: BLE001 - report the real reason
+        BUS.emit("error", message=f"Send failed: {exc}")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    await memory.set_draft_status(draft_id, "sent")
+    BUS.emit("draft", id=draft_id, status="sent", to=draft["to_addr"])
+    return JSONResponse({"ok": True, "status": "sent"})
+
+
+# -- work and ventures ---------------------------------------------------
+
+
+@app.get("/api/work")
+async def work() -> JSONResponse:
+    return JSONResponse(
+        {
+            "autonomy": autonomy.status(),
+            "tasks": await memory.list_tasks(25),
+            "ventures": await memory.list_ventures(),
+        }
+    )
+
+
+@app.post("/api/work/queue")
+async def queue_work(payload: dict[str, Any]) -> JSONResponse:
+    title = str(payload.get("title", "")).strip()
+    if not title:
+        return JSONResponse({"error": "title required"}, status_code=400)
+    task_id = await memory.queue_task(
+        title, str(payload.get("detail", "")), origin="user", priority=2
+    )
+    BUS.emit("work_queued", id=task_id, title=title, origin="user")
+    return JSONResponse({"ok": True, "id": task_id})
+
+
+@app.post("/api/routine/{name}")
+async def run_routine(name: str) -> JSONResponse:
+    """Trigger a scheduled routine on demand (briefing, ventures, worker)."""
+    for routine in autonomy.routines:
+        if routine.name == name:
+            routine.last_run = time.time()
+            asyncio.create_task(routine.run())
+            return JSONResponse({"ok": True, "routine": name})
+    return JSONResponse({"error": f"no routine '{name}'"}, status_code=404)
 
 
 # -- WebSocket -----------------------------------------------------------

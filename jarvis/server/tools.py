@@ -74,8 +74,12 @@ class ToolError(Exception):
 
 
 class ToolRegistry:
-    def __init__(self, memory: Memory) -> None:
+    def __init__(self, memory: Memory, connector=None) -> None:
         self.memory = memory
+        # The email connector is optional; the mail tools report that it
+        # isn't configured rather than disappearing, so the model can tell
+        # the user what to do about it.
+        self.connector = connector
         self.tools: dict[str, Tool] = {}
         self._register_all()
 
@@ -84,10 +88,22 @@ class ToolRegistry:
     def add(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
 
-    def specs(self) -> list[dict[str, Any]]:
-        """Local tool definitions plus Anthropic's server-side tools."""
-        specs = [t.spec() for t in self.tools.values()]
-        if CONFIG.enable_web:
+    def specs(
+        self,
+        names: list[str] | None = None,
+        include_server_tools: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Local tool definitions plus Anthropic's server-side tools.
+
+        `names` restricts the surface — the background worker gets a smaller
+        one than the conversational core.
+        """
+        selected = self.tools.values()
+        if names is not None:
+            allowed = set(names)
+            selected = [t for t in self.tools.values() if t.name in allowed]
+        specs = [t.spec() for t in selected]
+        if CONFIG.enable_web and include_server_tools:
             specs.append({"type": "web_search_20260209", "name": "web_search"})
             specs.append({"type": "web_fetch_20260209", "name": "web_fetch"})
         return specs
@@ -137,6 +153,9 @@ class ToolRegistry:
         self._register_files()
         self._register_exec()
         self._register_system()
+        self._register_email()
+        self._register_work()
+        self._register_ventures()
 
     # ---- time ----------------------------------------------------------
 
@@ -676,6 +695,402 @@ class ToolRegistry:
                 ),
                 input_schema={"type": "object", "properties": {}},
                 handler=system_status,
+            )
+        )
+
+
+    # ---- email ---------------------------------------------------------
+
+    def _register_email(self) -> None:
+        async def list_emails(args: dict[str, Any]) -> Any:
+            rows = await self.memory.list_emails(
+                limit=int(args.get("limit", 20)),
+                unhandled_only=bool(args.get("unhandled_only", True)),
+            )
+            minimum = int(args.get("min_priority", 0))
+            return [
+                {
+                    "id": r["id"],
+                    "from": r["sender"],
+                    "email": r["sender_email"],
+                    "subject": r["subject"],
+                    "priority": r["priority_label"],
+                    "category": r["category"],
+                    "summary": r["summary"],
+                    "action": r["action"],
+                    "needs_reply": bool(r["needs_reply"]),
+                    "received": datetime.fromtimestamp(r["received"]).isoformat(
+                        timespec="minutes"
+                    ) if r["received"] else "",
+                }
+                for r in rows
+                if r["priority"] >= minimum
+            ]
+
+        async def read_email(args: dict[str, Any]) -> Any:
+            rows = await self.memory.list_emails(limit=200, unhandled_only=False)
+            email_id = int(args.get("email_id", 0))
+            for row in rows:
+                if row["id"] == email_id:
+                    return {
+                        "from": f'{row["sender"]} <{row["sender_email"]}>',
+                        "subject": row["subject"],
+                        "received": datetime.fromtimestamp(
+                            row["received"]
+                        ).isoformat(timespec="minutes") if row["received"] else "",
+                        "priority": row["priority_label"],
+                        "category": row["category"],
+                        "body": row["snippet"],
+                    }
+            raise ToolError(f"No email #{email_id} in the triaged store.")
+
+        async def search_email(args: dict[str, Any]) -> Any:
+            query = str(args.get("query", "")).strip()
+            if not query:
+                raise ToolError("'query' is required.")
+            rows = await self.memory.search_emails(query, int(args.get("limit", 10)))
+            return [
+                {
+                    "id": r["id"], "from": r["sender"], "subject": r["subject"],
+                    "priority": r["priority_label"], "summary": r["summary"],
+                }
+                for r in rows
+            ]
+
+        async def draft_reply(args: dict[str, Any]) -> str:
+            to_addr = str(args.get("to", "")).strip()
+            subject = str(args.get("subject", "")).strip()
+            body = str(args.get("body", "")).strip()
+            email_id = args.get("email_id")
+            if not body:
+                raise ToolError("'body' is required.")
+
+            if email_id and not (to_addr and subject):
+                rows = await self.memory.list_emails(limit=200, unhandled_only=False)
+                for row in rows:
+                    if row["id"] == int(email_id):
+                        to_addr = to_addr or row["sender_email"]
+                        if not subject:
+                            original = row["subject"]
+                            subject = (
+                                original if original.lower().startswith("re:")
+                                else f"Re: {original}"
+                            )
+                        break
+            if not to_addr:
+                raise ToolError("'to' is required (or a valid 'email_id').")
+
+            draft_id = await self.memory.add_draft(
+                to_addr, subject or "(no subject)", body,
+                int(email_id) if email_id else None,
+            )
+            return (
+                f"Draft #{draft_id} saved for {to_addr}. It is waiting for the"
+                " user's approval in the HUD — nothing has been sent."
+            )
+
+        async def mark_handled(args: dict[str, Any]) -> str:
+            email_id = int(args.get("email_id", 0))
+            ok = await self.memory.mark_email_handled(email_id)
+            return f"Email #{email_id} marked handled." if ok else f"No email #{email_id}."
+
+        self.add(
+            Tool(
+                name="list_emails",
+                description=(
+                    "List triaged inbox messages with their priority, category and"
+                    " one-line summary. This is your view of the user's mail —"
+                    " use it before answering anything about their inbox."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer"},
+                        "unhandled_only": {"type": "boolean"},
+                        "min_priority": {
+                            "type": "integer",
+                            "description": "0 noise, 2 normal, 3 high, 4 critical.",
+                        },
+                    },
+                },
+                handler=list_emails,
+            )
+        )
+        self.add(
+            Tool(
+                name="read_email",
+                description="Read the stored text of one triaged email by id.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"email_id": {"type": "integer"}},
+                    "required": ["email_id"],
+                },
+                handler=read_email,
+            )
+        )
+        self.add(
+            Tool(
+                name="search_email",
+                description="Search triaged mail by sender, subject or content.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+                handler=search_email,
+            )
+        )
+        self.add(
+            Tool(
+                name="draft_reply",
+                description=(
+                    "Write a reply and queue it for the user's approval. This never"
+                    " sends anything — the user approves or discards it in the HUD."
+                    " Pass email_id to reply to a triaged message and the recipient"
+                    " and subject are filled in for you."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "email_id": {"type": "integer"},
+                        "to": {"type": "string"},
+                        "subject": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
+                    "required": ["body"],
+                },
+                handler=draft_reply,
+            )
+        )
+        self.add(
+            Tool(
+                name="mark_email_handled",
+                description="Mark a triaged email as dealt with so it stops surfacing.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"email_id": {"type": "integer"}},
+                    "required": ["email_id"],
+                },
+                handler=mark_handled,
+            )
+        )
+
+    # ---- background work -----------------------------------------------
+
+    def _register_work(self) -> None:
+        async def queue_task(args: dict[str, Any]) -> str:
+            title = str(args.get("title", "")).strip()
+            if not title:
+                raise ToolError("'title' is required.")
+            task_id = await self.memory.queue_task(
+                title,
+                str(args.get("detail", "")),
+                origin=str(args.get("origin", "conversation")),
+                priority=int(args.get("priority", 3)),
+            )
+            return (
+                f"Queued as background task #{task_id}. It will run with tools"
+                " and report back when done."
+            )
+
+        async def list_tasks(_: dict[str, Any]) -> Any:
+            rows = await self.memory.list_tasks(20)
+            return [
+                {
+                    "id": r["id"], "title": r["title"], "status": r["status"],
+                    "result": r["result"][:400],
+                }
+                for r in rows
+            ]
+
+        async def note_observation(args: dict[str, Any]) -> str:
+            text = str(args.get("text", "")).strip()
+            if not text:
+                raise ToolError("'text' is required.")
+            await self.memory.add_observation(text)
+            return "Observation recorded."
+
+        self.add(
+            Tool(
+                name="queue_task",
+                description=(
+                    "Queue work for yourself to do in the background, with tools."
+                    " Use it when something needs real research or drafting rather"
+                    " than an immediate answer, so the user isn't left waiting."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "detail": {
+                            "type": "string",
+                            "description": "Everything the background run needs;"
+                                           " it cannot ask follow-up questions.",
+                        },
+                        "priority": {"type": "integer", "description": "1 highest, 5 lowest."},
+                    },
+                    "required": ["title"],
+                },
+                handler=queue_task,
+            )
+        )
+        self.add(
+            Tool(
+                name="list_tasks",
+                description="See queued, running and finished background work.",
+                input_schema={"type": "object", "properties": {}},
+                handler=list_tasks,
+            )
+        )
+        self.add(
+            Tool(
+                name="note_observation",
+                description="Record a durable note for your future self.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+                handler=note_observation,
+            )
+        )
+
+    # ---- ventures ------------------------------------------------------
+
+    def _register_ventures(self) -> None:
+        async def propose_venture(args: dict[str, Any]) -> str:
+            title = str(args.get("title", "")).strip()
+            next_step = str(args.get("next_step", "")).strip()
+            if not title:
+                raise ToolError("'title' is required.")
+            if not next_step:
+                raise ToolError(
+                    "'next_step' is required — a proposal without a concrete first"
+                    " step isn't actionable."
+                )
+            venture_id = await self.memory.add_venture(
+                {
+                    "title": title,
+                    "thesis": str(args.get("thesis", "")),
+                    "category": str(args.get("category", "other")),
+                    "effort": str(args.get("effort", "medium")),
+                    "horizon": str(args.get("horizon", "weeks")),
+                    "confidence": float(args.get("confidence", 0.4) or 0.4),
+                    "next_step": next_step,
+                    "evidence": str(args.get("evidence", "")),
+                }
+            )
+            return f"Venture #{venture_id} recorded: {title}"
+
+        async def list_ventures(args: dict[str, Any]) -> Any:
+            status = args.get("status")
+            rows = await self.memory.list_ventures(
+                None if status in (None, "all") else str(status)
+            )
+            return [
+                {
+                    "id": r["id"], "title": r["title"], "status": r["status"],
+                    "confidence": r["confidence"], "effort": r["effort"],
+                    "horizon": r["horizon"], "thesis": r["thesis"][:300],
+                    "next_step": r["next_step"], "evidence": r["evidence"][:300],
+                }
+                for r in rows
+            ]
+
+        async def update_venture(args: dict[str, Any]) -> str:
+            venture_id = int(args.get("venture_id", 0))
+            ok = await self.memory.update_venture(
+                venture_id,
+                status=args.get("status"),
+                next_step=args.get("next_step"),
+                evidence=args.get("evidence"),
+            )
+            return f"Venture #{venture_id} updated." if ok else f"No venture #{venture_id}."
+
+        self.add(
+            Tool(
+                name="propose_venture",
+                description=(
+                    "Record a concrete way the user could make money, grounded in"
+                    " their actual skills, assets and time. Requires a real first"
+                    " step they could take this week. Set confidence honestly —"
+                    " most ideas deserve below 0.5."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "thesis": {
+                            "type": "string",
+                            "description": "Why this could work for them specifically,"
+                                           " and what would have to be true.",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["service", "product", "content", "consulting",
+                                     "arbitrage", "employment", "other"],
+                        },
+                        "effort": {"type": "string", "enum": ["low", "medium", "high"]},
+                        "horizon": {
+                            "type": "string",
+                            "enum": ["days", "weeks", "months", "years"],
+                        },
+                        "confidence": {"type": "number"},
+                        "next_step": {
+                            "type": "string",
+                            "description": "One concrete action for this week.",
+                        },
+                        "evidence": {
+                            "type": "string",
+                            "description": "What you actually verified, and what you"
+                                           " could not.",
+                        },
+                    },
+                    "required": ["title", "next_step"],
+                },
+                handler=propose_venture,
+            )
+        )
+        self.add(
+            Tool(
+                name="list_ventures",
+                description="List tracked money-making opportunities and their status.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["proposed", "active", "parked", "dropped", "all"],
+                        }
+                    },
+                },
+                handler=list_ventures,
+            )
+        )
+        self.add(
+            Tool(
+                name="update_venture",
+                description=(
+                    "Advance, park or drop a venture, or sharpen its next step as"
+                    " you learn more."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "venture_id": {"type": "integer"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["proposed", "active", "parked", "dropped"],
+                        },
+                        "next_step": {"type": "string"},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["venture_id"],
+                },
+                handler=update_venture,
             )
         )
 

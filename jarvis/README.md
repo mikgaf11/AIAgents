@@ -94,6 +94,86 @@ Tune it in `.env`: `JARVIS_DEEP_REFLECTION` (seconds between passes on a static
 world), or `JARVIS_COGNITION=0` to switch the background mind off entirely and
 make it purely reactive.
 
+## Connecting your email
+
+```bash
+python3 connect.py
+```
+
+It asks for your address and an app password, works out the IMAP/SMTP
+settings from the domain (Gmail, Outlook, iCloud, Fastmail, Yahoo, Proton
+Bridge, or anything you type in by hand), proves the login works before
+saving, and stores it in `jarvis/.env` at mode 600.
+
+**Use an app password, not your real one.** Every major provider issues them
+once you have 2FA on — Google Account → Security → App passwords, and the
+equivalent on the others. `connect.py` names the right page for your provider.
+
+From then on JARVIS checks your inbox every few minutes and, for each new
+message, decides:
+
+- **priority** — critical, high, normal, low, or noise
+- **category** — personal, work, financial, opportunity, admin, newsletter,
+  automated, spam
+- **a one-line summary** and, when there is one, **the next action**
+
+Crucially it judges importance *to you*: the classifier is handed your stored
+facts, open goals and tracked ventures, so a message about a project you're
+actually working on outranks a louder one that has nothing to do with you.
+Mail that scores high or critical gets **flagged in your real mailbox**, so
+the triage shows up in whatever mail app you already use — JARVIS isn't
+another inbox to check. Only *critical* mail is allowed to speak up.
+
+### Nothing gets sent without you
+
+JARVIS drafts replies freely. Sending is a separate, deliberate act:
+
+1. It writes a draft — into the Inbox tab, never onto the wire.
+2. You read it and press **Approve & Send** or **Discard**.
+3. Sending only works at all if you set `JARVIS_EMAIL_ALLOW_SEND=1`.
+
+Both gates are on by default. Autonomous background work can draft, but it
+has no send tool at all — that's enforced by its restricted tool surface,
+not just by instructions.
+
+## Working on its own
+
+Four things run in the background whether or not you're there:
+
+| Routine | Cadence | What it does |
+|---|---|---|
+| Mail sweep | every 3 min | Fetch, triage, flag, and queue drafts for anything needing a reply |
+| Morning briefing | 08:00 daily | Spoken digest: what landed overnight, what deserves attention today |
+| Venture review | every 6h | Propose and sharpen money-making opportunities |
+| Work queue | continuous | Execute queued tasks with full tools, then report back |
+
+The **work queue** is the interesting one. JARVIS can queue work for itself —
+research a question you left open, draft something you'll need, dig into a
+stalled goal — and each task runs as a real agentic loop with tools: it reads
+files, runs code, searches the web, writes results to disk, and reports what
+it actually did. You can queue work yourself by just asking; watch it run in
+the **Work** tab.
+
+Background runs can't ask you questions mid-task, so their prompt tells them
+to make reasonable calls and state the assumption rather than stalling — and
+to report honestly when a tool failed instead of claiming success.
+
+## Money and ventures
+
+The **Ventures** tab tracks concrete opportunities rather than a list of
+generic ideas. Every proposal has to carry a thesis grounded in what you can
+actually do, a **first step you could take this week**, an honest confidence
+score, and what the assistant could and couldn't verify.
+
+Be clear-eyed about what this is. It is a good research assistant and a
+candid sounding board: it will tell you when an idea is weak, name the risk
+alongside the upside, and check claims about pricing or demand against the
+web. It cannot predict markets, and it doesn't do get-rich schemes,
+stock-picking, or anything requiring capital you haven't told it about. The
+prompt pushes it toward *below* 0.5 confidence on most ideas, because most
+ideas deserve that. Your judgement decides; its job is to be specific and
+honest.
+
 ## What it can actually do
 
 **Reasoning.** Claude Opus 5 with adaptive thinking and configurable effort.
@@ -114,6 +194,10 @@ Cognition Stream panel and the deep-layer brain activity — with the default
 | `shell` | Shell commands in the workspace |
 | `system_status` | CPU, memory, disk, uptime, battery |
 | `web_search` / `web_fetch` | Anthropic server-side tools, run on their infra |
+| `list_emails` / `read_email` / `search_email` | Its view of your triaged inbox |
+| `draft_reply` / `mark_email_handled` | Prepare replies for approval; clear the queue |
+| `queue_task` / `list_tasks` | Give itself background work and check on it |
+| `propose_venture` / `list_ventures` / `update_venture` | The opportunity pipeline |
 
 **Memory.** SQLite with FTS5. Retrieval blends lexical relevance, a recency
 half-life, and a stored importance weight, which behaves much like a small
@@ -191,7 +275,20 @@ whole filesystem, as the user running the process. That is a real decision —
 make it deliberately, and read the persona prompt's operating limits first.
 
 Credentials are never written to memory, and the system prompt says so
-explicitly.
+explicitly. Your email password lives only in `jarvis/.env` (mode 600) and is
+never stored in the database, spoken, or written into a memory record.
+
+Email specifically has three independent gates: sending is off unless you
+enable it, every draft waits for a click, and the background worker has no
+send tool in its surface at all.
+
+### What it does *not* connect to
+
+Email is the connector that's built. Calendar, Slack, Notion and the rest
+aren't wired up — `server/connectors/` is the seam where they'd go, and each
+needs its own auth and its own thinking about what autonomous access should
+mean. I'd rather ship one connector that works properly than five that
+half-work with your real accounts.
 
 ## Tests
 
@@ -210,10 +307,15 @@ mid-conversation-system-message fallback.
 ```
 jarvis/
 ├── install.py         one-time setup: autostart service + app icon
+├── connect.py         email setup wizard
 ├── uninstall.py       removes both, leaves your data alone
 ├── launcher.py        what the icon runs: ensures the core is up, opens the HUD
 ├── server/
-│   ├── core.py        streaming turn loop, tool orchestration, telemetry
+│   ├── agent.py       the streaming tool loop, shared by chat and background work
+│   ├── core.py        conversation state, memory context, telemetry
+│   ├── autonomy.py    scheduled routines and the background work queue
+│   ├── triage.py      email classification against your priorities
+│   ├── connectors/    external services (email today; the seam for more)
 │   ├── cognition.py   the background mind
 │   ├── memory.py      SQLite + FTS5 store and hybrid retrieval
 │   ├── tools.py       every capability, plus the safe-mode sandbox

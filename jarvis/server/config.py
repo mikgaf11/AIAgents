@@ -110,6 +110,38 @@ class Config:
     history_turns: int = _env_int("JARVIS_HISTORY_TURNS", 40)
     recall_results: int = _env_int("JARVIS_RECALL_RESULTS", 8)
 
+    # --- email ----------------------------------------------------------
+    # Host/port are optional: they're inferred from the address for the
+    # common providers. The password must be an app password on any
+    # provider with 2FA.
+    email_address: str = _env("JARVIS_EMAIL_ADDRESS", "")
+    email_password: str = _env("JARVIS_EMAIL_PASSWORD", "")
+    email_imap_host: str = _env("JARVIS_EMAIL_IMAP_HOST", "")
+    email_imap_port: int = _env_int("JARVIS_EMAIL_IMAP_PORT", 993)
+    email_smtp_host: str = _env("JARVIS_EMAIL_SMTP_HOST", "")
+    email_smtp_port: int = _env_int("JARVIS_EMAIL_SMTP_PORT", 587)
+    email_smtp_ssl: bool = _env_bool("JARVIS_EMAIL_SMTP_SSL", False)
+    email_folder: str = _env("JARVIS_EMAIL_FOLDER", "INBOX")
+    email_poll_interval: float = _env_float("JARVIS_EMAIL_POLL", 180.0)
+    email_batch: int = _env_int("JARVIS_EMAIL_BATCH", 15)
+    # Flag high-priority mail in the real mailbox so triage is visible in
+    # whatever mail client you already use.
+    email_flag_important: bool = _env_bool("JARVIS_EMAIL_FLAG", True)
+    # Sending is off by default. Drafts always require explicit approval.
+    email_allow_send: bool = _env_bool("JARVIS_EMAIL_ALLOW_SEND", False)
+    # Speak up unprompted when mail this important lands (4 = critical).
+    email_announce_priority: int = _env_int("JARVIS_EMAIL_ANNOUNCE", 4)
+
+    # --- autonomy schedule ----------------------------------------------
+    briefing_hour: int = _env_int("JARVIS_BRIEFING_HOUR", 8)
+    briefing_minute: int = _env_int("JARVIS_BRIEFING_MINUTE", 0)
+    venture_interval: float = _env_float("JARVIS_VENTURE_INTERVAL", 21600.0)
+    task_worker_enabled: bool = _env_bool("JARVIS_TASK_WORKER", True)
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.email_address and self.email_password)
+
     @property
     def api_key(self) -> str | None:
         return os.environ.get("ANTHROPIC_API_KEY") or None

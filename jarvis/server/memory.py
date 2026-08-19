@@ -77,7 +77,87 @@ CREATE TABLE IF NOT EXISTS observations (
     text        TEXT    NOT NULL,
     surfaced    INTEGER NOT NULL DEFAULT 0
 );
+
+-- Triaged mail. Bodies are deliberately not stored in full: a snippet is
+-- enough for triage and recall, and it keeps the database small and less
+-- sensitive than a second copy of the whole mailbox.
+CREATE TABLE IF NOT EXISTS emails (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           REAL    NOT NULL,
+    account      TEXT    NOT NULL DEFAULT 'default',
+    folder       TEXT    NOT NULL DEFAULT 'INBOX',
+    uid          INTEGER NOT NULL,
+    message_id   TEXT    NOT NULL DEFAULT '',
+    sender       TEXT    NOT NULL DEFAULT '',
+    sender_email TEXT    NOT NULL DEFAULT '',
+    subject      TEXT    NOT NULL DEFAULT '',
+    snippet      TEXT    NOT NULL DEFAULT '',
+    received     REAL    NOT NULL DEFAULT 0,
+    priority     INTEGER NOT NULL DEFAULT 2,
+    category     TEXT    NOT NULL DEFAULT 'other',
+    summary      TEXT    NOT NULL DEFAULT '',
+    action       TEXT    NOT NULL DEFAULT '',
+    needs_reply  INTEGER NOT NULL DEFAULT 0,
+    handled      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(account, folder, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_emails_priority ON emails(handled, priority DESC, ts DESC);
+
+-- Outbound drafts wait here for explicit approval. Nothing is ever sent
+-- without the user pressing the button.
+CREATE TABLE IF NOT EXISTS drafts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    email_id    INTEGER,
+    to_addr     TEXT    NOT NULL,
+    subject     TEXT    NOT NULL,
+    body        TEXT    NOT NULL,
+    status      TEXT    NOT NULL DEFAULT 'pending',
+    sent_at     REAL    NOT NULL DEFAULT 0
+);
+
+-- The background work queue: things JARVIS decided to do for itself.
+CREATE TABLE IF NOT EXISTS tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    title       TEXT    NOT NULL,
+    detail      TEXT    NOT NULL DEFAULT '',
+    origin      TEXT    NOT NULL DEFAULT 'cognition',
+    status      TEXT    NOT NULL DEFAULT 'pending',
+    priority    INTEGER NOT NULL DEFAULT 3,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    result      TEXT    NOT NULL DEFAULT '',
+    started     REAL    NOT NULL DEFAULT 0,
+    finished    REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, priority, id);
+
+-- Money-making opportunities, tracked like goals but with an explicit
+-- thesis and a concrete next step so they don't stay abstract.
+CREATE TABLE IF NOT EXISTS ventures (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    title       TEXT    NOT NULL,
+    thesis      TEXT    NOT NULL DEFAULT '',
+    category    TEXT    NOT NULL DEFAULT 'other',
+    effort      TEXT    NOT NULL DEFAULT 'medium',
+    horizon     TEXT    NOT NULL DEFAULT 'weeks',
+    confidence  REAL    NOT NULL DEFAULT 0.5,
+    next_step   TEXT    NOT NULL DEFAULT '',
+    evidence    TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'proposed',
+    updated     REAL    NOT NULL
+);
+
+-- Per-connector bookkeeping, e.g. the highest mail UID already seen.
+CREATE TABLE IF NOT EXISTS connector_state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated     REAL NOT NULL
+);
 """
+
+PRIORITY_LABELS = {0: "noise", 1: "low", 2: "normal", 3: "high", 4: "critical"}
 
 FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
@@ -498,6 +578,337 @@ class Memory:
 
         await self._run(_write)
 
+    # -- connector bookkeeping -------------------------------------------
+
+    async def get_state(self, key: str, default: str = "") -> str:
+        def _read() -> str:
+            row = self._db.execute(
+                "SELECT value FROM connector_state WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else default
+
+        return await self._run(_read)
+
+    async def set_state(self, key: str, value: str) -> None:
+        def _write() -> None:
+            self._db.execute(
+                "INSERT INTO connector_state (key, value, updated) VALUES (?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                " updated=excluded.updated",
+                (key, value, time.time()),
+            )
+            self._db.commit()
+
+        await self._run(_write)
+
+    # -- email -----------------------------------------------------------
+
+    async def record_email(self, message: dict[str, Any]) -> int | None:
+        """Store a triaged email. Returns None if this UID was already seen."""
+
+        def _write() -> int | None:
+            try:
+                cur = self._db.execute(
+                    "INSERT INTO emails (ts, account, folder, uid, message_id, sender,"
+                    " sender_email, subject, snippet, received, priority, category,"
+                    " summary, action, needs_reply)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        time.time(),
+                        message.get("account", "default"),
+                        message.get("folder", "INBOX"),
+                        int(message.get("uid", 0)),
+                        message.get("message_id", ""),
+                        message.get("sender", ""),
+                        message.get("sender_email", ""),
+                        message.get("subject", ""),
+                        message.get("snippet", "")[:2000],
+                        float(message.get("received", 0) or 0),
+                        int(message.get("priority", 2)),
+                        message.get("category", "other"),
+                        message.get("summary", ""),
+                        message.get("action", ""),
+                        1 if message.get("needs_reply") else 0,
+                    ),
+                )
+                self._db.commit()
+                return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                return None  # already triaged
+
+        return await self._run(_write)
+
+    async def list_emails(
+        self, *, limit: int = 40, unhandled_only: bool = False
+    ) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            sql = "SELECT * FROM emails"
+            if unhandled_only:
+                sql += " WHERE handled = 0"
+            sql += " ORDER BY priority DESC, received DESC LIMIT ?"
+            rows = self._db.execute(sql, (limit,)).fetchall()
+            return [self._email_row(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def urgent_emails(self, limit: int = 5) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM emails WHERE handled = 0 AND priority >= 3"
+                " ORDER BY priority DESC, received DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._email_row(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def mark_email_handled(self, email_id: int) -> bool:
+        def _write() -> bool:
+            cur = self._db.execute(
+                "UPDATE emails SET handled = 1 WHERE id = ?", (email_id,)
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+        return await self._run(_write)
+
+    async def search_emails(self, query: str, limit: int = 15) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            like = f"%{query.lower()}%"
+            rows = self._db.execute(
+                "SELECT * FROM emails WHERE lower(subject) LIKE ?"
+                " OR lower(sender) LIKE ? OR lower(snippet) LIKE ?"
+                " ORDER BY received DESC LIMIT ?",
+                (like, like, like, limit),
+            ).fetchall()
+            return [self._email_row(r) for r in rows]
+
+        return await self._run(_read)
+
+    @staticmethod
+    def _email_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["priority_label"] = PRIORITY_LABELS.get(data["priority"], "normal")
+        return data
+
+    # -- drafts ----------------------------------------------------------
+
+    async def add_draft(
+        self, to_addr: str, subject: str, body: str, email_id: int | None = None
+    ) -> int:
+        def _write() -> int:
+            cur = self._db.execute(
+                "INSERT INTO drafts (ts, email_id, to_addr, subject, body)"
+                " VALUES (?,?,?,?,?)",
+                (time.time(), email_id, to_addr, subject, body),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def list_drafts(self, status: str = "pending") -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM drafts WHERE status = ? ORDER BY id DESC LIMIT 25",
+                (status,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def get_draft(self, draft_id: int) -> dict[str, Any] | None:
+        def _read() -> dict[str, Any] | None:
+            row = self._db.execute(
+                "SELECT * FROM drafts WHERE id = ?", (draft_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+        return await self._run(_read)
+
+    async def set_draft_status(self, draft_id: int, status: str) -> bool:
+        def _write() -> bool:
+            cur = self._db.execute(
+                "UPDATE drafts SET status = ?, sent_at = ? WHERE id = ?",
+                (status, time.time() if status == "sent" else 0, draft_id),
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+        return await self._run(_write)
+
+    # -- background tasks ------------------------------------------------
+
+    async def queue_task(
+        self, title: str, detail: str = "", *, origin: str = "cognition",
+        priority: int = 3,
+    ) -> int:
+        def _write() -> int:
+            # Don't queue the same work twice while it's still outstanding.
+            existing = self._db.execute(
+                "SELECT id FROM tasks WHERE title = ? AND status IN ('pending','running')",
+                (title,),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
+            cur = self._db.execute(
+                "INSERT INTO tasks (ts, title, detail, origin, priority)"
+                " VALUES (?,?,?,?,?)",
+                (time.time(), title, detail, origin, priority),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def next_task(self) -> dict[str, Any] | None:
+        """Claim the highest-priority pending task, marking it running."""
+
+        def _write() -> dict[str, Any] | None:
+            row = self._db.execute(
+                "SELECT * FROM tasks WHERE status = 'pending'"
+                " ORDER BY priority ASC, id ASC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            self._db.execute(
+                "UPDATE tasks SET status='running', attempts = attempts + 1,"
+                " started = ? WHERE id = ?",
+                (time.time(), row["id"]),
+            )
+            self._db.commit()
+            return dict(row)
+
+        return await self._run(_write)
+
+    async def finish_task(self, task_id: int, result: str, status: str = "done") -> None:
+        def _write() -> None:
+            self._db.execute(
+                "UPDATE tasks SET status = ?, result = ?, finished = ? WHERE id = ?",
+                (status, result[:8000], time.time(), task_id),
+            )
+            self._db.commit()
+
+        await self._run(_write)
+
+    async def list_tasks(self, limit: int = 25) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM tasks ORDER BY"
+                " CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,"
+                " id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def requeue_stuck_tasks(self, older_than: float = 1800.0) -> int:
+        """Recover tasks orphaned by a restart mid-run."""
+
+        def _write() -> int:
+            cutoff = time.time() - older_than
+            cur = self._db.execute(
+                "UPDATE tasks SET status = 'pending' WHERE status = 'running'"
+                " AND started < ? AND attempts < 3",
+                (cutoff,),
+            )
+            self._db.execute(
+                "UPDATE tasks SET status = 'failed' WHERE status = 'running'"
+                " AND started < ? AND attempts >= 3",
+                (cutoff,),
+            )
+            self._db.commit()
+            return cur.rowcount
+
+        return await self._run(_write)
+
+    # -- ventures --------------------------------------------------------
+
+    async def add_venture(self, venture: dict[str, Any]) -> int:
+        def _write() -> int:
+            now = time.time()
+            title = str(venture.get("title", "")).strip()
+            existing = self._db.execute(
+                "SELECT id FROM ventures WHERE lower(title) = ?", (title.lower(),)
+            ).fetchone()
+            if existing:
+                self._db.execute(
+                    "UPDATE ventures SET thesis=?, next_step=?, evidence=?,"
+                    " confidence=?, updated=? WHERE id=?",
+                    (
+                        venture.get("thesis", ""),
+                        venture.get("next_step", ""),
+                        venture.get("evidence", ""),
+                        float(venture.get("confidence", 0.5) or 0.5),
+                        now,
+                        existing["id"],
+                    ),
+                )
+                self._db.commit()
+                return int(existing["id"])
+            cur = self._db.execute(
+                "INSERT INTO ventures (ts, title, thesis, category, effort, horizon,"
+                " confidence, next_step, evidence, status, updated)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    now,
+                    title,
+                    venture.get("thesis", ""),
+                    venture.get("category", "other"),
+                    venture.get("effort", "medium"),
+                    venture.get("horizon", "weeks"),
+                    float(venture.get("confidence", 0.5) or 0.5),
+                    venture.get("next_step", ""),
+                    venture.get("evidence", ""),
+                    venture.get("status", "proposed"),
+                    now,
+                ),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def list_ventures(self, status: str | None = None) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            if status:
+                rows = self._db.execute(
+                    "SELECT * FROM ventures WHERE status = ?"
+                    " ORDER BY confidence DESC, updated DESC",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM ventures ORDER BY"
+                    " CASE status WHEN 'active' THEN 0 WHEN 'proposed' THEN 1"
+                    " ELSE 2 END, confidence DESC, updated DESC"
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def update_venture(
+        self, venture_id: int, *, status: str | None = None,
+        next_step: str | None = None, evidence: str | None = None,
+    ) -> bool:
+        def _write() -> bool:
+            sets, params = ["updated = ?"], [time.time()]
+            for column, value in (
+                ("status", status), ("next_step", next_step), ("evidence", evidence),
+            ):
+                if value is not None:
+                    sets.append(f"{column} = ?")
+                    params.append(value)
+            params.append(venture_id)
+            cur = self._db.execute(
+                f"UPDATE ventures SET {', '.join(sets)} WHERE id = ?", params
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+        return await self._run(_write)
+
     # -- stats -----------------------------------------------------------
 
     async def stats(self) -> dict[str, Any]:
@@ -512,6 +923,12 @@ class Memory:
                 "goals_open": count("goals", "WHERE status='open'"),
                 "reminders_pending": count("reminders", "WHERE fired=0"),
                 "observations": count("observations"),
+                "emails": count("emails"),
+                "emails_unhandled": count("emails", "WHERE handled=0"),
+                "emails_urgent": count("emails", "WHERE handled=0 AND priority>=3"),
+                "drafts_pending": count("drafts", "WHERE status='pending'"),
+                "tasks_pending": count("tasks", "WHERE status IN ('pending','running')"),
+                "ventures": count("ventures", "WHERE status IN ('proposed','active')"),
                 "db_kb": round(self.path.stat().st_size / 1024, 1)
                 if self.path.exists()
                 else 0.0,

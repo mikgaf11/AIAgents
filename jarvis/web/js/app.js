@@ -35,7 +35,20 @@ const el = {
   mood: $("mood-label"),
   interim: $("interim"),
   banner: $("banner"),
+  inboxList: $("inbox-list"),
+  inboxBadge: $("inbox-badge"),
+  emailStatus: $("email-status"),
+  draftList: $("draft-list"),
+  workList: $("work-list"),
+  workNow: $("work-now"),
+  workBadge: $("work-badge"),
+  ventureList: $("venture-list"),
+  briefing: $("briefing"),
+  briefingBody: $("briefing-body"),
+  briefingClose: $("briefing-close"),
 };
+
+const PRIORITY_LABELS = ["noise", "low", "normal", "high", "critical"];
 
 /* ---------------------------------------------------------------- state -- */
 
@@ -170,6 +183,48 @@ function handleEvent(event) {
     case "cognition":
       addThought(event.text, event.mood || "calm");
       el.mood.textContent = (event.mood || "calm").toUpperCase();
+      break;
+
+    case "email":
+      addInboxEntry(event);
+      refreshInbox();
+      break;
+
+    case "email_status":
+      el.emailStatus.textContent = event.detail || "";
+      el.emailStatus.classList.toggle("bad", event.ok === false);
+      break;
+
+    case "work_queued":
+      addThought(`queued: ${event.title}`, "focused");
+      refreshWork();
+      break;
+
+    case "work_start":
+      el.workNow.textContent = `▶ ${event.title}`;
+      el.workNow.classList.add("busy");
+      addThought(`working: ${event.title}`, "focused");
+      refreshWork();
+      break;
+
+    case "work_end":
+      el.workNow.textContent = "";
+      el.workNow.classList.remove("busy");
+      addWorkResult(event);
+      refreshWork();
+      break;
+
+    case "briefing":
+      showBriefing(event.text);
+      break;
+
+    case "draft":
+      refreshInbox();
+      banner(
+        event.status === "sent"
+          ? `Sent to ${event.to}`
+          : `Draft ${event.status}`
+      );
       break;
 
     case "proactive":
@@ -327,6 +382,219 @@ function addMemory(event) {
   el.memory.appendChild(node);
   trimChildren(el.memory, 25);
   el.memory.scrollTop = el.memory.scrollHeight;
+}
+
+/* -------------------------------------------------------- inbox & work -- */
+
+function priorityName(value) {
+  return PRIORITY_LABELS[value] || "normal";
+}
+
+function addInboxEntry(event) {
+  // Live arrival notice; the full list is re-rendered from the API.
+  addThought(
+    `mail [${event.label}] ${event.sender}: ${event.subject}`,
+    event.priority >= 3 ? "concerned" : "reason"
+  );
+  if (event.priority >= 3) brain.ripple(0.9);
+}
+
+function renderInbox(data) {
+  const messages = data.messages || [];
+  const unhandled = messages.filter((m) => !m.handled);
+  const urgent = unhandled.filter((m) => m.priority >= 3);
+
+  el.inboxBadge.textContent = urgent.length ? String(urgent.length) : "";
+  el.inboxBadge.classList.toggle("hot", urgent.length > 0);
+
+  const status = data.email || {};
+  if (!status.configured) {
+    el.emailStatus.innerHTML =
+      'not connected — run <code>python3 connect.py</code>';
+    el.emailStatus.classList.add("bad");
+  } else if (status.error) {
+    el.emailStatus.textContent = status.error;
+    el.emailStatus.classList.add("bad");
+  } else {
+    const when = status.last_sweep
+      ? new Date(status.last_sweep * 1000).toLocaleTimeString()
+      : "not yet";
+    el.emailStatus.textContent =
+      `${status.address} · ${status.triaged} triaged · checked ${when}`;
+    el.emailStatus.classList.remove("bad");
+  }
+
+  renderDrafts(data.drafts || []);
+
+  el.inboxList.innerHTML = "";
+  if (!unhandled.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = status.configured ? "inbox clear" : "no mail connected";
+    el.inboxList.appendChild(empty);
+    return;
+  }
+
+  for (const message of unhandled.slice(0, 30)) {
+    const node = document.createElement("div");
+    node.className = `mail p${message.priority}`;
+    node.innerHTML =
+      `<div class="mail-head">` +
+      `<span class="mail-priority"></span>` +
+      `<span class="mail-from"></span>` +
+      `<button class="mail-done" title="Mark handled">✓</button></div>` +
+      `<div class="mail-subject"></div>` +
+      `<div class="mail-summary"></div>`;
+    node.querySelector(".mail-priority").textContent = priorityName(message.priority);
+    node.querySelector(".mail-from").textContent = message.sender;
+    node.querySelector(".mail-subject").textContent = message.subject;
+    node.querySelector(".mail-summary").textContent =
+      message.summary + (message.action ? ` → ${message.action}` : "");
+    node.querySelector(".mail-done").addEventListener("click", async () => {
+      await fetch(`/api/email/handled/${message.id}`, { method: "POST" });
+      refreshInbox();
+    });
+    el.inboxList.appendChild(node);
+  }
+}
+
+function renderDrafts(drafts) {
+  el.draftList.innerHTML = "";
+  for (const draft of drafts) {
+    const node = document.createElement("div");
+    node.className = "draft";
+    node.innerHTML =
+      `<div class="draft-head">DRAFT → <span class="draft-to"></span></div>` +
+      `<div class="draft-subject"></div>` +
+      `<div class="draft-body"></div>` +
+      `<div class="draft-actions">` +
+      `<button class="approve">APPROVE &amp; SEND</button>` +
+      `<button class="discard">DISCARD</button></div>`;
+    node.querySelector(".draft-to").textContent = draft.to_addr;
+    node.querySelector(".draft-subject").textContent = draft.subject;
+    node.querySelector(".draft-body").textContent = draft.body;
+
+    node.querySelector(".approve").addEventListener("click", async () => {
+      const response = await fetch(`/api/draft/${draft.id}/approve`, { method: "POST" });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        banner(detail.error || "Could not send", true);
+      }
+      refreshInbox();
+    });
+    node.querySelector(".discard").addEventListener("click", async () => {
+      await fetch(`/api/draft/${draft.id}/discard`, { method: "POST" });
+      refreshInbox();
+    });
+    el.draftList.appendChild(node);
+  }
+}
+
+function addWorkResult(event) {
+  addThought(
+    `${event.ok ? "done" : "failed"}: ${event.title}`,
+    event.ok ? "focused" : "error"
+  );
+}
+
+function renderWork(data) {
+  const tasks = data.tasks || [];
+  const pending = tasks.filter((t) => t.status === "pending" || t.status === "running");
+  el.workBadge.textContent = pending.length ? String(pending.length) : "";
+  el.workBadge.classList.toggle("hot", pending.some((t) => t.status === "running"));
+
+  const working = (data.autonomy || {}).working_on;
+  if (working) {
+    el.workNow.textContent = `▶ ${working}`;
+    el.workNow.classList.add("busy");
+  } else if (!el.workNow.classList.contains("busy")) {
+    el.workNow.textContent = "";
+  }
+
+  el.workList.innerHTML = "";
+  if (!tasks.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "nothing queued";
+    el.workList.appendChild(empty);
+    return;
+  }
+  for (const task of tasks.slice(0, 20)) {
+    const node = document.createElement("div");
+    node.className = `task ${task.status}`;
+    node.innerHTML =
+      `<div class="task-head"><span class="task-status"></span>` +
+      `<span class="task-title"></span></div>` +
+      (task.result ? `<div class="task-result"></div>` : "");
+    node.querySelector(".task-status").textContent = task.status;
+    node.querySelector(".task-title").textContent = task.title;
+    if (task.result) node.querySelector(".task-result").textContent = task.result;
+    el.workList.appendChild(node);
+  }
+}
+
+function renderVentures(ventures) {
+  el.ventureList.innerHTML = "";
+  if (!ventures.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "no opportunities tracked yet";
+    el.ventureList.appendChild(empty);
+    return;
+  }
+  for (const venture of ventures.slice(0, 20)) {
+    const node = document.createElement("div");
+    node.className = `venture ${venture.status}`;
+    const confidence = Math.round((venture.confidence || 0) * 100);
+    node.innerHTML =
+      `<div class="venture-head"><span class="venture-title"></span>` +
+      `<span class="venture-conf"></span></div>` +
+      `<div class="venture-meta"></div>` +
+      `<div class="venture-thesis"></div>` +
+      `<div class="venture-next"><b>next</b> <span></span></div>`;
+    node.querySelector(".venture-title").textContent = venture.title;
+    node.querySelector(".venture-conf").textContent = `${confidence}%`;
+    node.querySelector(".venture-meta").textContent =
+      `${venture.status} · ${venture.effort} effort · ${venture.horizon}`;
+    node.querySelector(".venture-thesis").textContent = venture.thesis || "";
+    node.querySelector(".venture-next span").textContent = venture.next_step || "—";
+    el.ventureList.appendChild(node);
+  }
+}
+
+function showBriefing(text) {
+  el.briefingBody.textContent = text;
+  el.briefing.classList.add("visible");
+}
+
+el.briefingClose.addEventListener("click", () =>
+  el.briefing.classList.remove("visible")
+);
+
+async function refreshInbox() {
+  try {
+    renderInbox(await fetch("/api/inbox").then((r) => r.json()));
+  } catch { /* link banner already reports outages */ }
+}
+
+async function refreshWork() {
+  try {
+    const data = await fetch("/api/work").then((r) => r.json());
+    renderWork(data);
+    renderVentures(data.ventures || []);
+  } catch { /* as above */ }
+}
+
+/* tabs */
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".tab")) {
+      other.classList.toggle("active", other === tab);
+    }
+    for (const panel of document.querySelectorAll(".tab-panel")) {
+      panel.classList.toggle("active", panel.dataset.panel === tab.dataset.tab);
+    }
+  });
 }
 
 function trimChildren(container, max) {
@@ -491,6 +759,12 @@ window.__jarvis = { brain, hud, voice, setState, submit, status: () => statusCac
 
 connect();
 refreshStatus();
+refreshInbox();
+refreshWork();
 setInterval(refreshStatus, 6000);
+// Mail and background work change on their own schedule, so poll them
+// independently of the conversation.
+setInterval(refreshInbox, 20000);
+setInterval(refreshWork, 15000);
 requestAnimationFrame(frame);
 el.input.focus();

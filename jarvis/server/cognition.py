@@ -40,9 +40,12 @@ IDLE_MURMURS = [
 
 
 class Cognition:
-    def __init__(self, jarvis: Jarvis) -> None:
+    def __init__(self, jarvis: Jarvis, autonomy=None) -> None:
         self.jarvis = jarvis
         self.memory = jarvis.memory
+        # Scheduled routines (mail, briefing, ventures, the work queue) ride
+        # on the same heartbeat as reflection.
+        self.autonomy = autonomy
         self.running = False
         self.ticks = 0
         self.reflections = 0
@@ -93,6 +96,11 @@ class Cognition:
                 f"Reminder: {reminder['text']}", reason="reminder"
             )
             return
+
+        # Scheduled work (mail sweep, briefing, ventures, the task queue) runs
+        # before reflection, so reflection sees the results of this tick.
+        if self.autonomy is not None:
+            await self.autonomy.tick()
 
         # Never think over the top of a live turn.
         if self.jarvis.busy.locked():
@@ -162,6 +170,19 @@ class Cognition:
             )
             BUS.emit("memory", op="goal", detail=json.dumps(update)[:120])
 
+        for task in verdict.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            title = str(task.get("title", "")).strip()
+            if title:
+                task_id = await self.memory.queue_task(
+                    title,
+                    str(task.get("detail", "")),
+                    origin="cognition",
+                    priority=int(task.get("priority", 3) or 3),
+                )
+                BUS.emit("work_queued", id=task_id, title=title, origin="cognition")
+
         speak = verdict.get("speak")
         if speak and self._may_speak():
             await self.jarvis.speak_unprompted(str(speak).strip(), reason="reflection")
@@ -187,11 +208,16 @@ class Cognition:
         goals = await self.memory.list_goals("open")
         observations = await self.memory.recent_observations(1)
         reminders = await self.memory.list_reminders()
+        stats = await self.memory.stats()
         return (
             episodes[-1]["id"] if episodes else 0,
             tuple(sorted((g["id"], round(g["progress"], 2), g["status"]) for g in goals)),
             observations[0]["id"] if observations else 0,
             len(reminders),
+            # New mail and finished background work are both worth thinking about.
+            stats.get("emails", 0),
+            stats.get("emails_unhandled", 0),
+            stats.get("tasks_pending", 0),
         )
 
     # -- snapshot & reflection -------------------------------------------

@@ -50,16 +50,43 @@
     </section>
   </aside>
 
-  <!-- right column -->
+  <!-- right column: tabbed, so the assistant's other jobs each get room -->
   <aside class="panel-column right">
-    <section class="panel grow">
-      <h2>Tool Trace</h2>
-      <div id="tool-trace" class="stream tools"></div>
-    </section>
+    <section class="panel grow tabbed">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="inbox" role="tab">
+          INBOX <span id="inbox-badge" class="badge"></span>
+        </button>
+        <button class="tab" data-tab="work" role="tab">
+          WORK <span id="work-badge" class="badge"></span>
+        </button>
+        <button class="tab" data-tab="ventures" role="tab">VENTURES</button>
+        <button class="tab" data-tab="tools" role="tab">TOOLS</button>
+        <button class="tab" data-tab="memory" role="tab">MEM</button>
+      </nav>
 
-    <section class="panel grow">
-      <h2>Memory I/O</h2>
-      <div id="memory-stream" class="stream memory"></div>
+      <div class="tab-panel active" data-panel="inbox">
+        <div id="email-status" class="panel-note"></div>
+        <div id="draft-list" class="drafts"></div>
+        <div id="inbox-list" class="stream inbox"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="work">
+        <div id="work-now" class="panel-note"></div>
+        <div id="work-list" class="stream work"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="ventures">
+        <div id="venture-list" class="stream ventures"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="tools">
+        <div id="tool-trace" class="stream tools"></div>
+      </div>
+
+      <div class="tab-panel" data-panel="memory">
+        <div id="memory-stream" class="stream memory"></div>
+      </div>
     </section>
   </aside>
 
@@ -97,6 +124,15 @@
       </label>
     </div>
   </main>
+
+  <!-- morning briefing / proactive report overlay -->
+  <div id="briefing" class="briefing">
+    <div class="briefing-head">
+      <span>BRIEFING</span>
+      <button id="briefing-close" class="briefing-close" title="Dismiss">×</button>
+    </div>
+    <div id="briefing-body" class="briefing-body"></div>
+  </div>
 
   <div id="banner" class="banner"></div>
 
