@@ -28,6 +28,7 @@ from server.connectors.email import (  # noqa: E402
     EmailConnector,
     guess_provider,
 )
+from server.console import read_secret, supports_interaction  # noqa: E402
 
 ENV_FILE = HERE / ".env"
 MANAGED_KEYS = (
@@ -118,8 +119,19 @@ async def setup() -> int:
             print("  No IMAP host given. Nothing was saved.")
             return 1
 
-    print("  The password is not echoed, and is stored only in jarvis/.env.")
-    password = getpass.getpass("  App password: ").strip()
+    if not supports_interaction():
+        print("\n  This console isn't interactive, so I can't prompt for the")
+        print("  password. Add these to jarvis/.env by hand instead:")
+        print(f"      JARVIS_EMAIL_ADDRESS={address}")
+        print("      JARVIS_EMAIL_PASSWORD=your-app-password")
+        print(f"      JARVIS_EMAIL_IMAP_HOST={imap_host}")
+        print(f"      JARVIS_EMAIL_IMAP_PORT={imap_port}")
+        print(f"      JARVIS_EMAIL_SMTP_HOST={smtp_host}")
+        print(f"      JARVIS_EMAIL_SMTP_PORT={smtp_port}")
+        print("  Then run:  python3 restart.py\n")
+        return 1
+
+    password = read_secret("  App password: ")
     if not password:
         print("  No password given. Nothing was saved.")
         return 1

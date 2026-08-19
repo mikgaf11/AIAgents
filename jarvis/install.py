@@ -30,6 +30,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+from server.console import read_secret, supports_interaction  # noqa: E402
+
 SYSTEM = platform.system()  # Darwin | Linux | Windows
 
 ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
@@ -121,14 +125,23 @@ def ensure_api_key(dry_run: bool) -> bool:
     print()
     print("  JARVIS needs an Anthropic API key to think.")
     print("  Get one at https://console.anthropic.com/settings/keys")
-    print("  (paste it below — it will not be echoed, and is stored only in jarvis/.env)")
-    print("  Press Enter to skip; the HUD still runs, just without reasoning.")
-    try:
-        key = getpass.getpass("  API key: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        key = ""
+    print("  It is stored only in jarvis/.env on this machine.")
+
+    if not supports_interaction():
+        # No real terminal (an IDE run window, or piped input): prompting here
+        # would hang or silently read nothing.
+        print()
+        say("this console isn't interactive, so I can't prompt for the key")
+        say("add it by hand instead: copy .env.example to .env and set")
+        say("ANTHROPIC_API_KEY=sk-ant-...  then run:  python3 restart.py")
+        return False
+
+    print("  Press Enter on its own to skip; the HUD still runs without reasoning.")
+    key = read_secret("  API key: ")
     if not key:
         say("skipped — JARVIS will start in offline mode")
+        say("to add it later: put ANTHROPIC_API_KEY=... in jarvis/.env,"
+            " then run python3 restart.py")
         return False
     if not key.startswith("sk-"):
         say("that doesn't look like an Anthropic key (they start with 'sk-'), storing anyway")
