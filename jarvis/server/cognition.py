@@ -45,8 +45,13 @@ class Cognition:
         self.memory = jarvis.memory
         self.running = False
         self.ticks = 0
+        self.reflections = 0
         self.mood = "calm"
         self._task: asyncio.Task | None = None
+        # Reflection is the only part of a tick that costs money, so it is
+        # gated on the world having actually changed.
+        self._fingerprint: tuple | None = None
+        self._last_reflection = 0.0
 
     # -- lifecycle -------------------------------------------------------
 
@@ -97,6 +102,24 @@ class Cognition:
             BUS.emit("cognition", text=random.choice(IDLE_MURMURS), mood="calm",
                      tick=self.ticks)
             return
+
+        # An assistant that runs at login reflects around the clock. Skip the
+        # model call when nothing has changed since the last pass, so an idle
+        # machine costs a few calls an hour instead of one every interval.
+        fingerprint = await self._world_fingerprint()
+        stale = time.time() - self._last_reflection >= CONFIG.deep_reflection_interval
+        if fingerprint == self._fingerprint and not stale:
+            BUS.emit(
+                "cognition",
+                text=random.choice(IDLE_MURMURS),
+                mood=self.mood,
+                tick=self.ticks,
+                idle=True,
+            )
+            return
+        self._fingerprint = fingerprint
+        self._last_reflection = time.time()
+        self.reflections += 1
 
         snapshot = await self._snapshot()
         verdict = await self._reflect(snapshot)
@@ -152,6 +175,23 @@ class Cognition:
             idle >= CONFIG.proactive_after_idle
             and since_last >= CONFIG.proactive_cooldown
             and not self.jarvis.busy.locked()
+        )
+
+    async def _world_fingerprint(self) -> tuple:
+        """A cheap summary of everything reflection would look at.
+
+        If this is unchanged, a fresh reflection pass would be handed an
+        identical snapshot and produce nothing new.
+        """
+        episodes = await self.memory.recent_episodes(1)
+        goals = await self.memory.list_goals("open")
+        observations = await self.memory.recent_observations(1)
+        reminders = await self.memory.list_reminders()
+        return (
+            episodes[-1]["id"] if episodes else 0,
+            tuple(sorted((g["id"], round(g["progress"], 2), g["status"]) for g in goals)),
+            observations[0]["id"] if observations else 0,
+            len(reminders),
         )
 
     # -- snapshot & reflection -------------------------------------------

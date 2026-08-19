@@ -322,6 +322,71 @@ def test_history_trim_never_orphans_a_tool_result(jarvis):
     ), "history must not start with an orphaned tool_result"
 
 
+class CountingReflector:
+    """Stands in for the background model, counting how often it's consulted."""
+
+    def __init__(self):
+        self.messages = self
+        self.calls = 0
+
+    async def create(self, **_):
+        self.calls += 1
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[text_block('{"thought": "quiet", "mood": "calm", "speak": null}')],
+        )
+
+
+def test_cognition_skips_the_model_when_nothing_changed(jarvis):
+    """An always-on assistant must not pay for reflection on an idle machine."""
+    from server.cognition import Cognition
+
+    jarvis.client = CountingReflector()
+    mind = Cognition(jarvis)
+
+    asyncio.run(mind.tick())
+    assert jarvis.client.calls == 1, "first pass should reflect"
+
+    # Nothing has changed — these ticks must be free.
+    asyncio.run(mind.tick())
+    asyncio.run(mind.tick())
+    assert jarvis.client.calls == 1, "unchanged world must not trigger the model"
+
+    # A new episode changes the world, so reflection resumes.
+    asyncio.run(jarvis.memory.add_episode("user", "something new happened"))
+    asyncio.run(mind.tick())
+    assert jarvis.client.calls == 2, "a changed world must trigger reflection"
+
+
+def test_cognition_reflects_again_once_the_pass_goes_stale(jarvis):
+    """Even with a static world it must think occasionally, for time-based things."""
+    from server.cognition import Cognition
+
+    jarvis.client = CountingReflector()
+    mind = Cognition(jarvis)
+    asyncio.run(mind.tick())
+    assert jarvis.client.calls == 1
+
+    # Pretend the last reflection was long ago.
+    mind._last_reflection = 0.0
+    asyncio.run(mind.tick())
+    assert jarvis.client.calls == 2
+
+
+def test_cognition_never_speaks_while_a_turn_is_running(jarvis):
+    from server.cognition import Cognition
+
+    jarvis.client = CountingReflector()
+    mind = Cognition(jarvis)
+
+    async def run():
+        async with jarvis.busy:  # a turn is in flight
+            await mind.tick()
+
+    asyncio.run(run())
+    assert jarvis.client.calls == 0, "must not think over the top of a live turn"
+
+
 def test_current_utterance_is_not_recalled_back_as_memory(jarvis):
     """Retrieval runs before the episode is stored, or every turn echoes itself."""
     jarvis.client = FakeClient([turn([text_block("Noted.")], "end_turn")])

@@ -100,6 +100,9 @@ class Config:
     # user must be quiet before it is allowed to speak first.
     cognition_enabled: bool = _env_bool("JARVIS_COGNITION", True)
     cognition_interval: float = _env_float("JARVIS_COGNITION_INTERVAL", 45.0)
+    # Longest gap between real reflection passes when nothing is changing.
+    # Ticks in between are free — they never call the model.
+    deep_reflection_interval: float = _env_float("JARVIS_DEEP_REFLECTION", 900.0)
     proactive_after_idle: float = _env_float("JARVIS_PROACTIVE_AFTER_IDLE", 120.0)
     proactive_cooldown: float = _env_float("JARVIS_PROACTIVE_COOLDOWN", 300.0)
 

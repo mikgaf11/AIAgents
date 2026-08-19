@@ -51,6 +51,20 @@ app = FastAPI(title=f"{CONFIG.assistant_name} Core", lifespan=lifespan)
 # -- API -----------------------------------------------------------------
 
 
+@app.get("/api/health")
+async def health() -> JSONResponse:
+    """Cheap liveness probe used by the launcher and the autostart service."""
+    return JSONResponse(
+        {
+            "ok": True,
+            "name": CONFIG.assistant_name,
+            "online": jarvis.online,
+            "state": jarvis.state,
+            "reflections": cognition.reflections,
+        }
+    )
+
+
 @app.get("/api/status")
 async def status() -> JSONResponse:
     return JSONResponse(await jarvis.status())

@@ -25,7 +25,54 @@ when it speaks, a shockwave crosses the volume in time with the voice.
                     Claude Opus 5 (adaptive thinking)
 ```
 
-## Quick start
+## Install it once, then forget it exists
+
+**macOS / Linux** — double-click **`Install JARVIS.command`**
+**Windows** — double-click **`Install JARVIS.bat`**
+
+(Or from a terminal: `python3 install.py`.)
+
+It creates the virtual environment, installs dependencies, asks for your
+Anthropic API key once, and then:
+
+- **starts JARVIS automatically when you log in**, restarting it if it ever dies
+- **adds a JARVIS icon** to your Applications / app menu / Desktop
+- **opens the HUD in its own window** when you click that icon — no address bar,
+  no tab, behaves like a native app
+
+After that you never touch a terminal. Click the icon, or just leave the tab
+open — the core is already running in the background either way.
+
+Everything is per-user and local: no admin rights, nothing system-wide, and
+the server only ever binds `127.0.0.1`, so it is not reachable from your
+network.
+
+To remove the autostart and the icon: `python3 uninstall.py`. It leaves your
+project, key and memory alone.
+
+### Using it
+
+Click the icon, then either talk or type.
+
+- **Space** — toggle the microphone
+- **Escape** — cut off speech mid-sentence
+- **Wake word** — tick it and JARVIS only acts on speech that starts with
+  "Jarvis"; leave it off and everything it hears is a command
+- **Drag** the brain to rotate it
+
+It interrupts you cleanly: start talking while it's speaking and it stops.
+
+Try: *"What's my CPU doing?"* · *"Remember I prefer metric units."* ·
+*"Remind me in ten minutes to check the oven."* · *"What did we decide about
+the launch date?"* · *"Search the web for the latest on X and summarize it."*
+
+> Voice needs Chrome, Edge, Brave or Safari — Firefox has no Web Speech
+> recognition. The launcher picks a Chromium-family browser automatically if
+> you have one, whatever your system default is.
+
+### Running it by hand instead
+
+If you'd rather not install the autostart:
 
 ```bash
 cd jarvis
@@ -33,15 +80,19 @@ cp .env.example .env          # add your ANTHROPIC_API_KEY
 ./run.sh                      # creates a venv, installs deps, boots the core
 ```
 
-Open <http://127.0.0.1:8788>, click **MIC OFF** to arm the microphone (or press
-Space), and talk. Type in the composer if you'd rather not speak.
-
-Without credentials it still boots: the HUD, memory, and tools all run, and it
+Without credentials it still boots: the HUD, memory and tools all run, and it
 tells you plainly that the reasoning core is missing.
 
-> Voice input needs Chrome, Edge, or Safari — Firefox has no Web Speech
-> recognition. On a non-localhost host, browsers require HTTPS for microphone
-> access.
+### What it costs to leave running
+
+The background mind wakes every 45 seconds, but a tick only calls the model
+when something actually changed — a new message, a goal moved, a reminder
+appeared. On an idle machine it falls back to one cheap pass every 15 minutes,
+so leaving JARVIS on all day costs a few cents rather than a few dollars.
+
+Tune it in `.env`: `JARVIS_DEEP_REFLECTION` (seconds between passes on a static
+world), or `JARVIS_COGNITION=0` to switch the background mind off entirely and
+make it purely reactive.
 
 ## What it can actually do
 
@@ -158,6 +209,9 @@ mid-conversation-system-message fallback.
 
 ```
 jarvis/
+├── install.py         one-time setup: autostart service + app icon
+├── uninstall.py       removes both, leaves your data alone
+├── launcher.py        what the icon runs: ensures the core is up, opens the HUD
 ├── server/
 │   ├── core.py        streaming turn loop, tool orchestration, telemetry
 │   ├── cognition.py   the background mind
