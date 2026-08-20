@@ -328,6 +328,14 @@ StartupNotify=true
         plan.run("update-desktop-database", str(desktop.parent))
     plan.notes.append("JARVIS added to your application menu.")
 
+    if not (shutil.which("xdotool") or shutil.which("xprop")):
+        # Without one of these there is no way to see which window is in
+        # front, so time tracking and coaching silently do nothing.
+        plan.notes.append(
+            "Activity tracking needs xdotool:  sudo apt install xdotool"
+            "  (without it, play-time and coaching stay idle)"
+        )
+
 
 def plan_windows(plan: Plan) -> None:
     gui_python = venv_python(for_gui=True)
@@ -445,7 +453,10 @@ def main() -> int:
         say(note)
     say(f"Open JARVIS any time at http://{CONFIG.host}:{CONFIG.port}")
     if not has_key:
-        say("No API key set — add one to jarvis/.env and it will think on restart.")
+        say("No reasoning core yet — the HUD runs, but it can't think.")
+        say("Fix with either:  ollama pull llama3.1:8b   (free)")
+        say("             or:  ANTHROPIC_API_KEY=... in jarvis/.env")
+        say("then:  python3 restart.py")
     print()
     say("To remove all of this later:  python3 uninstall.py")
     print()

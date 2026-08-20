@@ -72,6 +72,36 @@ the launch date?"* · *"Search the web for the latest on X and summarize it."*
 > recognition. The launcher picks a Chromium-family browser automatically if
 > you have one, whatever your system default is.
 
+### Is it actually running?
+
+```bash
+python3 status.py
+```
+
+One command, and every failing line names the command that fixes it:
+
+```
+  [  ok  ] core                   up at http://127.0.0.1:8788
+  [  ok  ] reasoning              llama3.1:8b — on this machine, free
+  [  ok  ] starts at login        systemd user unit enabled
+  [ down ] watching               cannot read the foreground window
+         └─ sudo apt install xdotool
+  [ warn ] file access            workspace only
+         └─ to reach your real files, set JARVIS_FILE_ROOTS in jarvis/.env
+```
+
+Closing the browser window doesn't stop anything — the core is a separate
+background process. Mail still gets triaged, work still runs, and nudges
+still reach you through OS notifications. The window is just a view onto it.
+
+Three commands are the whole maintenance surface:
+
+| | |
+|---|---|
+| `python3 status.py` | Is everything working, and what's the fix if not |
+| `python3 restart.py` | Pick up changes to `.env` (waits for the old process to die) |
+| `python3 uninstall.py` | Remove autostart and the icon; data and keys untouched |
+
 ### Changing the voice
 
 Click **VOICE** in the composer bar. You get every voice your system has,
@@ -460,7 +490,7 @@ half-work with your real accounts.
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest tests/ -q      # 174 tests, no API key needed
+./.venv/bin/python -m pytest tests/ -q      # 179 tests, no API key needed
 ```
 
 The suite covers memory retrieval and FTS injection safety, tool sandboxing,
@@ -481,6 +511,7 @@ to run it.
 ```
 jarvis/
 ├── install.py         one-time setup: autostart service + app icon
+├── status.py          one-command health check with the fix for each failure
 ├── connect.py         email setup wizard
 ├── uninstall.py       removes both, leaves your data alone
 ├── launcher.py        what the icon runs: ensures the core is up, opens the HUD

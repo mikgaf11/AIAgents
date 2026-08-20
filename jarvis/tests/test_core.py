@@ -457,3 +457,86 @@ def test_system_message_rejection_folds_context_into_user_turn(jarvis):
     assert all(m["role"] != "system" for m in retried)
     # The recalled context must survive the fold, not be silently dropped.
     assert any("Oslo" in m["content"] for m in retried if isinstance(m["content"], str))
+
+
+# -- backend reachability --------------------------------------------------
+
+
+class _ProbeClient(FakeClient):
+    """A local-style client whose reachability can be flipped mid-test."""
+
+    is_local = True
+    model = "llama3.1:8b"
+    background_model = "llama3.1:8b"
+
+    def __init__(self, ok: bool):
+        super().__init__([])
+        self.ok = ok
+        self.probes = 0
+
+    async def probe(self):
+        self.probes += 1
+        return {"ok": True} if self.ok else {
+            "ok": False, "error": "Ollama not reachable"
+        }
+
+
+def test_a_configured_but_unreachable_backend_is_reported_as_such(jarvis):
+    """'Configured' and 'usable' are different things, and the HUD needs both.
+
+    A local model that was never pulled leaves a perfectly good client object
+    behind, so `online` alone would claim everything is fine.
+    """
+    async def run():
+        jarvis.client = _ProbeClient(ok=False)
+        status = await jarvis.status()
+        assert status["online"] is True
+        assert status["reachable"] is False
+        assert "not reachable" in status["backend_error"]
+
+    asyncio.run(run())
+
+
+def test_a_reachable_backend_reports_its_own_model_name(jarvis):
+    async def run():
+        jarvis.client = _ProbeClient(ok=True)
+        status = await jarvis.status()
+        assert status["reachable"] is True
+        assert status["model"] == "llama3.1:8b"
+        assert status["local"] is True
+
+    asyncio.run(run())
+
+
+def test_the_probe_is_cached_so_status_polling_stays_cheap(jarvis):
+    async def run():
+        client = _ProbeClient(ok=True)
+        jarvis.client = client
+        for _ in range(5):
+            await jarvis.probe_backend()
+        assert client.probes == 1
+        # Past the cache window it checks again.
+        await jarvis.probe_backend(max_age=0)
+        assert client.probes == 2
+
+    asyncio.run(run())
+
+
+def test_an_api_backend_with_no_probe_is_taken_at_face_value(jarvis):
+    """Probing Anthropic would cost a request, so a key is trusted until used."""
+    async def run():
+        jarvis.client = FakeClient([])
+        assert (await jarvis.probe_backend())["ok"] is True
+
+    asyncio.run(run())
+
+
+def test_offline_reports_unreachable_rather_than_claiming_a_model(jarvis):
+    async def run():
+        jarvis.client = None
+        status = await jarvis.status()
+        assert status["online"] is False
+        assert status["reachable"] is False
+        assert status["model"] == "offline"
+
+    asyncio.run(run())

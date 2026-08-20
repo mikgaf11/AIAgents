@@ -40,6 +40,12 @@ class Jarvis:
         self.turn_count = 0
         self.total_tokens = {"input": 0, "output": 0, "cache_read": 0}
         self.client, self.backend = make_client(CONFIG)
+        # A local backend can exist as an object while Ollama is stopped or
+        # the model was never pulled, so reachability is checked separately
+        # and cached — /api/status is polled every few seconds.
+        self.backend_ok: bool | None = None
+        self.backend_detail = ""
+        self._probed_at = 0.0
 
     # -- setup -----------------------------------------------------------
 
@@ -61,6 +67,29 @@ class Jarvis:
     def local(self) -> bool:
         """True when thinking happens on this machine and costs nothing."""
         return bool(getattr(self.client, "is_local", False))
+
+    async def probe_backend(self, *, max_age: float = 60.0) -> dict[str, Any]:
+        """Can the backend actually be reached right now?
+
+        Only the local backend can be checked cheaply — a probe against the
+        Anthropic API would cost a request, so a configured key is taken at
+        face value and a real failure surfaces on the next turn.
+        """
+        if not self.online:
+            return {"ok": False, "error": "no reasoning core attached"}
+        probe = getattr(self.client, "probe", None)
+        if probe is None:
+            return {"ok": True, "model": self.model}
+
+        now = time.time()
+        if self.backend_ok is not None and (now - self._probed_at) < max_age:
+            return {"ok": self.backend_ok, "error": self.backend_detail}
+
+        result = await probe()
+        self._probed_at = now
+        self.backend_ok = bool(result.get("ok"))
+        self.backend_detail = result.get("error", "")
+        return result
 
     @property
     def mid_conversation_system(self) -> bool:
@@ -274,9 +303,12 @@ class Jarvis:
     async def status(self) -> dict[str, Any]:
         from .tools import collect_system_status
 
+        reachable = await self.probe_backend()
         return {
             "host": await asyncio.to_thread(collect_system_status),
             "online": self.online,
+            "reachable": bool(reachable.get("ok")),
+            "backend_error": reachable.get("error", ""),
             "model": self.model if self.online else "offline",
             "backend": self.backend,
             "local": self.local,

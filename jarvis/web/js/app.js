@@ -916,10 +916,16 @@ function formatTokens(totals) {
 function applyStatus(status) {
   if (!status) return;
   statusCache = status;
-  el.model.textContent = status.online
-    ? status.model + (status.local ? " · local" : "")
-    : "OFFLINE CORE";
-  el.model.classList.toggle("warn", !status.online);
+  // Online means "a backend is configured"; reachable means it actually
+  // answers. A local model that was never pulled is the difference.
+  const usable = status.online && status.reachable !== false;
+  el.model.textContent = !status.online
+    ? "OFFLINE CORE"
+    : usable
+      ? status.model + (status.local ? " · local" : "")
+      : "UNREACHABLE";
+  el.model.classList.toggle("warn", !usable);
+  el.model.title = usable ? "" : (status.backend_error || "");
   if (status.tokens) el.tokens.textContent = formatTokens(status.tokens);
   renderVitals(status);
 }
