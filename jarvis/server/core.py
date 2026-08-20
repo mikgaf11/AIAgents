@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from .agent import CAPABILITIES, Agent
+from .backends import make_client
 from .config import CONFIG
 from .events import BUS
 from .memory import Memory
@@ -38,39 +39,28 @@ class Jarvis:
         self.last_proactive = 0.0
         self.turn_count = 0
         self.total_tokens = {"input": 0, "output": 0, "cache_read": 0}
-        self.client = self._make_client()
+        self.client, self.backend = make_client(CONFIG)
 
     # -- setup -----------------------------------------------------------
-
-    def _make_client(self):
-        try:
-            from anthropic import AsyncAnthropic
-        except ImportError:
-            BUS.emit(
-                "error",
-                message="anthropic SDK not installed — running in offline mode.",
-            )
-            return None
-        if not CONFIG.has_credentials:
-            BUS.emit(
-                "error",
-                message=(
-                    "No Anthropic credentials found. Set ANTHROPIC_API_KEY or run"
-                    " `ant auth login`. Running in offline mode."
-                ),
-            )
-            return None
-        try:
-            # Long turns are normal at high effort; the per-request timeout
-            # has to allow for minutes of thinking plus tool rounds.
-            return AsyncAnthropic(timeout=900.0, max_retries=3)
-        except Exception as exc:  # noqa: BLE001 - surface, don't crash the server
-            BUS.emit("error", message=f"Could not create Anthropic client: {exc}")
-            return None
 
     @property
     def online(self) -> bool:
         return self.client is not None
+
+    @property
+    def model(self) -> str:
+        """The model name to send, which depends on which backend answered."""
+        return getattr(self.client, "model", None) or CONFIG.model
+
+    @property
+    def background_model(self) -> str:
+        """A cheaper model for chores — the same one locally, where it's free."""
+        return getattr(self.client, "background_model", None) or CONFIG.background_model
+
+    @property
+    def local(self) -> bool:
+        """True when thinking happens on this machine and costs nothing."""
+        return bool(getattr(self.client, "is_local", False))
 
     @property
     def mid_conversation_system(self) -> bool:
@@ -197,10 +187,10 @@ class Jarvis:
                 agent = Agent(
                     self.client,
                     self.tools,
-                    model=CONFIG.model,
+                    model=self.model,
                     effort=CONFIG.effort,
                     max_tokens=CONFIG.max_tokens,
-                    system=system_prompt(),
+                    system=system_prompt(self.model),
                     channel="main",
                     on_state=self.set_state,
                 )
@@ -247,10 +237,11 @@ class Jarvis:
 
         self.set_state("speaking", 0.55)
         reply = (
-            "I'm running without a reasoning core — no Anthropic credentials were "
-            "found. Set ANTHROPIC_API_KEY in the environment or in jarvis/.env, "
-            "then restart me. Memory, tools and the interface are all live; only "
-            "the thinking is missing."
+            "I'm running without a reasoning core. Two ways to fix that: put "
+            "ANTHROPIC_API_KEY in jarvis/.env for Claude, or install Ollama and "
+            f"run `ollama pull {CONFIG.ollama_model}` to think locally for free. "
+            "Either way, restart me afterwards. Memory, tools and the interface "
+            "are all live; only the thinking is missing."
         )
         for word in reply.split(" "):
             BUS.emit("token", text=word + " ")
@@ -286,7 +277,9 @@ class Jarvis:
         return {
             "host": await asyncio.to_thread(collect_system_status),
             "online": self.online,
-            "model": CONFIG.model if self.online else "offline",
+            "model": self.model if self.online else "offline",
+            "backend": self.backend,
+            "local": self.local,
             "effort": CONFIG.effort,
             "state": self.state,
             "turns": self.turn_count,

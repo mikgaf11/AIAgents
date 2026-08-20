@@ -163,7 +163,8 @@ class TriageEngine:
 
         try:
             response = await self.client.messages.create(
-                model=CONFIG.background_model,
+                model=(getattr(self.client, "background_model", None)
+                       or CONFIG.background_model),
                 max_tokens=CONFIG.background_max_tokens,
                 system=[
                     {

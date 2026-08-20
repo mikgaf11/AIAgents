@@ -50,6 +50,18 @@ SAFE_COMMANDS = {
 
 SHELL_METACHARS = re.compile(r"[;&|`$><\n]")
 
+# Directories that make a home-folder walk take minutes and never hold
+# anything the user was looking for.
+SKIP_DIRS = {
+    "node_modules", "__pycache__", "venv", ".venv", "site-packages", "Library",
+    "AppData", "Windows", "System32", "Program Files", "$Recycle.Bin",
+    "dist", "build", "target", "vendor", "Caches",
+}
+
+AUDIO_SUFFIXES = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus", ".aac", ".wma"}
+
+URL_SCHEMES = ("http://", "https://", "spotify:", "file://")
+
 
 @dataclass
 class Tool:
@@ -135,11 +147,13 @@ class ToolRegistry:
             candidate = CONFIG.workspace / candidate
         resolved = candidate.resolve()
         if CONFIG.safe_mode:
-            root = CONFIG.workspace.resolve()
-            if resolved != root and root not in resolved.parents:
+            roots = CONFIG.allowed_roots
+            if not any(resolved == r or r in resolved.parents for r in roots):
+                allowed = ", ".join(str(r) for r in roots)
                 raise ToolError(
-                    f"Path {resolved} is outside the workspace ({root})."
-                    " Safe mode confines file access to the workspace."
+                    f"Path {resolved} is outside the folders I'm allowed to touch"
+                    f" ({allowed}). Add it to JARVIS_FILE_ROOTS in jarvis/.env to"
+                    " grant access."
                 )
         return resolved
 
@@ -153,6 +167,7 @@ class ToolRegistry:
         self._register_files()
         self._register_exec()
         self._register_system()
+        self._register_desktop()
         self._register_email()
         self._register_work()
         self._register_ventures()
@@ -698,6 +713,273 @@ class ToolRegistry:
             )
         )
 
+    # ---- the desktop ---------------------------------------------------
+
+    def _register_desktop(self) -> None:
+        """Finding things, opening things, and playing music.
+
+        These are the tools that make it feel like it is *on* the machine
+        rather than in a browser tab. They are still bounded: file search
+        walks only the allowed roots, and opening anything is a single
+        argv-list call — never a shell string.
+        """
+
+        async def find_files(args: dict[str, Any]) -> str:
+            name = str(args.get("name", "")).strip()
+            if not name:
+                raise ToolError("'name' is required — a filename or part of one.")
+            needle = name.lower()
+            limit = max(1, min(int(args.get("limit", 40)), 200))
+            where = str(args.get("path", "")).strip()
+            roots = [self._resolve(where)] if where else list(CONFIG.allowed_roots)
+
+            def walk() -> list[str]:
+                hits: list[str] = []
+                for root in roots:
+                    if not root.is_dir():
+                        continue
+                    for dirpath, dirnames, filenames in os.walk(root):
+                        # Skip the caches and version-control noise that make
+                        # a home-directory walk take minutes.
+                        dirnames[:] = [
+                            d for d in dirnames
+                            if not d.startswith(".") and d not in SKIP_DIRS
+                        ]
+                        for filename in filenames:
+                            if needle in filename.lower():
+                                full = Path(dirpath) / filename
+                                try:
+                                    size = full.stat().st_size
+                                except OSError:
+                                    size = 0
+                                hits.append(f"{size:>10}  {full}")
+                                if len(hits) >= limit:
+                                    return hits
+                return hits
+
+            found = await asyncio.to_thread(walk)
+            if not found:
+                searched = ", ".join(str(r) for r in roots)
+                return f"No file matching {name!r} under {searched}."
+            return "\n".join(found)
+
+        async def open_path(args: dict[str, Any]) -> str:
+            if not CONFIG.allow_open:
+                raise ToolError(
+                    "Opening things is disabled (JARVIS_ALLOW_OPEN=0 in .env)."
+                )
+            target = str(args.get("target", "")).strip()
+            if not target:
+                raise ToolError("'target' is required — a file, folder or URL.")
+            if _is_url(target):
+                opened = target
+            else:
+                path = self._resolve(target)
+                if not path.exists():
+                    raise ToolError(f"Nothing at {path}.")
+                opened = str(path)
+            ok, detail = await asyncio.to_thread(_os_open, opened)
+            if not ok:
+                raise ToolError(f"Could not open {opened}: {detail}")
+            return f"Opened {opened}"
+
+        async def launch_app(args: dict[str, Any]) -> str:
+            if not CONFIG.allow_open:
+                raise ToolError(
+                    "Launching apps is disabled (JARVIS_ALLOW_OPEN=0 in .env)."
+                )
+            name = str(args.get("name", "")).strip()
+            if not name:
+                raise ToolError("'name' is required.")
+            if SHELL_METACHARS.search(name):
+                raise ToolError("App names cannot contain shell metacharacters.")
+            ok, detail = await asyncio.to_thread(_launch_app, name)
+            if not ok:
+                raise ToolError(f"Could not launch {name}: {detail}")
+            return f"Launched {name}"
+
+        async def play_music(args: dict[str, Any]) -> str:
+            if not CONFIG.allow_open:
+                raise ToolError("Playback is disabled (JARVIS_ALLOW_OPEN=0 in .env).")
+            query = str(args.get("query", "")).strip()
+            if _is_url(query):
+                ok, detail = await asyncio.to_thread(_os_open, query)
+                return f"Playing {query}" if ok else f"Could not open it: {detail}"
+
+            def search() -> list[Path]:
+                matches: list[Path] = []
+                needle = query.lower()
+                for raw in CONFIG.music_dirs:
+                    root = Path(raw).expanduser()
+                    if not root.is_dir():
+                        continue
+                    for file in root.rglob("*"):
+                        if (
+                            file.is_file()
+                            and file.suffix.lower() in AUDIO_SUFFIXES
+                            and (not needle or needle in file.name.lower())
+                        ):
+                            matches.append(file)
+                            if len(matches) >= 25:
+                                return matches
+                return matches
+
+            found = await asyncio.to_thread(search)
+            if not found:
+                where = ", ".join(CONFIG.music_dirs) or "(no music folders set)"
+                raise ToolError(
+                    f"No audio matching {query!r} in {where}. Set JARVIS_MUSIC_DIRS"
+                    " in .env, or give me a streaming URL instead."
+                )
+            ok, detail = await asyncio.to_thread(_os_open, str(found[0]))
+            if not ok:
+                raise ToolError(f"Found {found[0].name} but could not play it: {detail}")
+            more = f" ({len(found) - 1} other matches)" if len(found) > 1 else ""
+            return f"Playing {found[0].name}{more}"
+
+        async def media_control(args: dict[str, Any]) -> str:
+            action = str(args.get("action", "playpause")).lower()
+            if action not in ("playpause", "play", "pause", "next", "previous", "stop"):
+                raise ToolError("action must be playpause, next, previous or stop.")
+            ok, detail = await asyncio.to_thread(_media_key, action)
+            if not ok:
+                raise ToolError(f"Media control unavailable: {detail}")
+            return f"Sent {action} to whatever is playing."
+
+        async def activity_report(args: dict[str, Any]) -> dict[str, Any]:
+            hours = float(args.get("hours", 24))
+            since = time.time() - hours * 3600
+            return {
+                "window_hours": hours,
+                "by_app": await self.memory.activity_breakdown(since, 20),
+                "recent": (await self.memory.recent_activity(15)),
+            }
+
+        async def notify_me(args: dict[str, Any]) -> str:
+            from .notify import NOTIFIER
+
+            text = str(args.get("text", "")).strip()
+            if not text:
+                raise ToolError("'text' is required.")
+            delivered = await NOTIFIER.nudge(
+                text,
+                kind=str(args.get("kind", "coach")),
+                urgent=bool(args.get("urgent")),
+            )
+            return (
+                "Delivered." if delivered
+                else "Suppressed — too soon after the last interruption."
+            )
+
+        self.add(Tool(
+            name="find_files",
+            description=(
+                "Find files by name anywhere in the folders you're allowed to"
+                " reach. Use this when the user asks where something is, or"
+                " asks you to open a file they only half remember."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "Filename or part of one."},
+                    "path": {"type": "string",
+                             "description": "Optional directory to search under."},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["name"],
+            },
+            handler=find_files,
+        ))
+        self.add(Tool(
+            name="open_path",
+            description=(
+                "Open a file, folder or URL with whatever application the"
+                " system normally uses for it."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+            },
+            handler=open_path,
+            dangerous=True,
+        ))
+        self.add(Tool(
+            name="launch_app",
+            description="Start an application by name, e.g. 'Spotify', 'code'.",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            handler=launch_app,
+            dangerous=True,
+        ))
+        self.add(Tool(
+            name="play_music",
+            description=(
+                "Play music: a local track matching a search, or a streaming"
+                " URL. Give an empty query to play whatever is found first."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+            },
+            handler=play_music,
+            dangerous=True,
+        ))
+        self.add(Tool(
+            name="media_control",
+            description=(
+                "Pause, resume or skip whatever is currently playing, without"
+                " caring which app is playing it."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["playpause", "play", "pause", "next",
+                                 "previous", "stop"],
+                    }
+                },
+            },
+            handler=media_control,
+        ))
+        self.add(Tool(
+            name="activity_report",
+            description=(
+                "Where the user's time actually went — minutes per app and"
+                " category. Use it before commenting on their habits, so what"
+                " you say is grounded in what they did rather than a guess."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"hours": {"type": "number"}},
+            },
+            handler=activity_report,
+        ))
+        self.add(Tool(
+            name="notify_me",
+            description=(
+                "Pop up on screen and say something out loud, even if the HUD"
+                " is hidden behind a game. Rate-limited: use it when something"
+                " genuinely needs their attention, not to chat."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "kind": {"type": "string",
+                             "enum": ["coach", "alert", "reminder", "playtime"]},
+                    "urgent": {"type": "boolean"},
+                },
+                "required": ["text"],
+            },
+            handler=notify_me,
+            dangerous=True,
+        ))
 
     # ---- email ---------------------------------------------------------
 
@@ -1093,6 +1375,106 @@ class ToolRegistry:
                 handler=update_venture,
             )
         )
+
+
+def _is_url(target: str) -> bool:
+    return target.lower().startswith(URL_SCHEMES)
+
+
+def _os_open(target: str) -> tuple[bool, str]:
+    """Hand something to the desktop's default handler.
+
+    Always an argv list, never a shell string, so a filename containing a
+    space or a semicolon opens a file instead of running a command.
+    """
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(["open", target], capture_output=True, timeout=15,
+                           check=True)
+            return True, ""
+        if system == "Windows":
+            os.startfile(target)  # type: ignore[attr-defined]
+            return True, ""
+        if shutil.which("xdg-open"):
+            subprocess.Popen(
+                ["xdg-open", target],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True, ""
+        return False, "no xdg-open on this system"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+def _launch_app(name: str) -> tuple[bool, str]:
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(["open", "-a", name], capture_output=True, timeout=15,
+                           check=True)
+            return True, ""
+        if system == "Windows":
+            # `start` resolves registered app names as well as executables.
+            subprocess.run(["cmd", "/c", "start", "", name], capture_output=True,
+                           timeout=15, check=True)
+            return True, ""
+        binary = shutil.which(name) or shutil.which(name.lower())
+        if not binary:
+            return False, f"{name} is not on PATH"
+        subprocess.Popen(
+            [binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return True, ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+# Virtual key codes for the media keys on a standard keyboard.
+_WIN_MEDIA_KEYS = {
+    "playpause": 0xB3, "play": 0xB3, "pause": 0xB3,
+    "next": 0xB0, "previous": 0xB1, "stop": 0xB2,
+}
+
+
+def _media_key(action: str) -> tuple[bool, str]:
+    """Control playback without knowing which app is playing.
+
+    Each platform has one blessed way to do this: media keys on Windows,
+    MPRIS on Linux, and AppleScript against the frontmost player on macOS.
+    """
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            # Key code 16 is F16/play on the media layer; Music and Spotify
+            # both honour the system-wide play/pause event.
+            mapping = {
+                "playpause": 'tell application "System Events" to key code 49',
+                "play": 'tell application "Music" to play',
+                "pause": 'tell application "Music" to pause',
+                "stop": 'tell application "Music" to stop',
+                "next": 'tell application "Music" to next track',
+                "previous": 'tell application "Music" to previous track',
+            }
+            subprocess.run(["osascript", "-e", mapping[action]],
+                           capture_output=True, timeout=10)
+            return True, ""
+        if system == "Windows":
+            import ctypes
+
+            code = _WIN_MEDIA_KEYS[action]
+            ctypes.windll.user32.keybd_event(code, 0, 0, 0)  # type: ignore[attr-defined]
+            ctypes.windll.user32.keybd_event(code, 0, 2, 0)  # type: ignore[attr-defined]
+            return True, ""
+        if shutil.which("playerctl"):
+            verb = {"playpause": "play-pause", "previous": "previous"}.get(
+                action, action
+            )
+            subprocess.run(["playerctl", verb], capture_output=True, timeout=10)
+            return True, ""
+        return False, "install playerctl to control playback on Linux"
+    except (OSError, subprocess.SubprocessError, KeyError) as exc:
+        return False, str(exc)
 
 
 def collect_system_status() -> dict[str, Any]:

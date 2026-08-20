@@ -99,8 +99,24 @@ def ensure_venv(skip: bool) -> None:
     )
 
 
+def ollama_ready() -> tuple[bool, str]:
+    """Is a free local model already available? Returns (ready, detail)."""
+    try:
+        import json as _json
+        import urllib.request
+
+        url = os.environ.get("JARVIS_OLLAMA_URL", "http://127.0.0.1:11434")
+        with urllib.request.urlopen(f"{url}/api/tags", timeout=3) as response:
+            models = _json.loads(response.read()).get("models", [])
+    except Exception:  # noqa: BLE001 - any failure means "not usable"
+        return False, "not running"
+    if not models:
+        return False, "running, but no model pulled"
+    return True, ", ".join(m.get("name", "?") for m in models[:3])
+
+
 def ensure_api_key(dry_run: bool) -> bool:
-    """Make sure a key exists in .env. Returns True if one is configured."""
+    """Make sure a reasoning core is configured. Returns True if one is."""
     env_file = HERE / ".env"
     existing = ""
     if env_file.exists():
@@ -122,26 +138,42 @@ def ensure_api_key(dry_run: bool) -> bool:
         say("would prompt for an Anthropic API key")
         return False
 
+    local_ready, local_detail = ollama_ready()
+
     print()
-    print("  JARVIS needs an Anthropic API key to think.")
-    print("  Get one at https://console.anthropic.com/settings/keys")
-    print("  It is stored only in jarvis/.env on this machine.")
+    print("  JARVIS needs a reasoning core. There are two, and either works:")
+    print()
+    print("  1. Claude — much better reasoning, costs per token.")
+    print("     Get a key at https://console.anthropic.com/settings/keys")
+    print("     Stored only in jarvis/.env on this machine.")
+    print()
+    if local_ready:
+        print(f"  2. A local model — free. Already installed: {local_detail}")
+        print("     Press Enter below to use it and skip the key entirely.")
+    else:
+        print("  2. A local model — free forever, runs on your machine, weaker.")
+        print("     Install https://ollama.com then:  ollama pull llama3.1:8b")
+        print(f"     (Ollama is {local_detail} right now.)")
+    print()
 
     if not supports_interaction():
         # No real terminal (an IDE run window, or piped input): prompting here
         # would hang or silently read nothing.
-        print()
         say("this console isn't interactive, so I can't prompt for the key")
         say("add it by hand instead: copy .env.example to .env and set")
         say("ANTHROPIC_API_KEY=sk-ant-...  then run:  python3 restart.py")
-        return False
+        return local_ready
 
-    print("  Press Enter on its own to skip; the HUD still runs without reasoning.")
+    print("  Press Enter on its own to skip the key.")
     key = read_secret("  API key: ")
     if not key:
+        if local_ready:
+            say("no key given — running free on the local model")
+            return True
         say("skipped — JARVIS will start in offline mode")
-        say("to add it later: put ANTHROPIC_API_KEY=... in jarvis/.env,"
-            " then run python3 restart.py")
+        say("to fix that later, either put ANTHROPIC_API_KEY=... in jarvis/.env")
+        say("or install Ollama and run:  ollama pull llama3.1:8b")
+        say("then run:  python3 restart.py")
         return False
     if not key.startswith("sk-"):
         say("that doesn't look like an Anthropic key (they start with 'sk-'), storing anyway")

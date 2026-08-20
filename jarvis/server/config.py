@@ -137,6 +137,18 @@ class Config:
     safe_mode: bool = _env_bool("JARVIS_SAFE_MODE", True)
     enable_web: bool = _env_bool("JARVIS_ENABLE_WEB", True)
     shell_timeout: int = _env_int("JARVIS_SHELL_TIMEOUT", 30)
+    # Extra directories the file tools may touch while safe mode stays on.
+    # This is how you grant real system access without handing over a shell:
+    # name the folders you actually want reached, e.g. ~/Documents,~/Projects.
+    file_roots: tuple[str, ...] = tuple(
+        r.strip() for r in _env("JARVIS_FILE_ROOTS", "").split(",") if r.strip()
+    )
+    # Where to look when you ask for a song. Defaults to the usual place.
+    music_dirs: tuple[str, ...] = tuple(
+        r.strip() for r in _env("JARVIS_MUSIC_DIRS", "~/Music").split(",") if r.strip()
+    )
+    # Opening files and launching apps. Off means it can only read and write.
+    allow_open: bool = _env_bool("JARVIS_ALLOW_OPEN", True)
 
     # --- autonomy -------------------------------------------------------
     # How often the background mind wakes up to reflect, and how long the
@@ -175,11 +187,56 @@ class Config:
     # Speak up unprompted when mail this important lands (4 = critical).
     email_announce_priority: int = _env_int("JARVIS_EMAIL_ANNOUNCE", 4)
 
+    # --- backend --------------------------------------------------------
+    # auto: Claude if credentials exist, otherwise a free local model.
+    backend: str = _env("JARVIS_BACKEND", "auto")  # auto | anthropic | ollama
+    ollama_url: str = _env("JARVIS_OLLAMA_URL", "http://127.0.0.1:11434")
+    ollama_model: str = _env("JARVIS_OLLAMA_MODEL", "llama3.1:8b")
+    ollama_background_model: str = _env("JARVIS_OLLAMA_BACKGROUND_MODEL", "")
+
+    # --- watching what you do -------------------------------------------
+    activity_enabled: bool = _env_bool("JARVIS_ACTIVITY", True)
+    activity_interval: float = _env_float("JARVIS_ACTIVITY_INTERVAL", 20.0)
+    # Shorter stretches are alt-tab noise, not something worth remembering.
+    activity_min_session: float = _env_float("JARVIS_ACTIVITY_MIN_SESSION", 45.0)
+    play_categories: tuple[str, ...] = tuple(
+        c.strip() for c in _env("JARVIS_PLAY_CATEGORIES", "game,media").split(",") if c.strip()
+    )
+    # Minutes of play before it says something, and again each interval after.
+    play_limit_minutes: float = _env_float("JARVIS_PLAY_LIMIT", 120.0)
+    play_reminder_every: float = _env_float("JARVIS_PLAY_REMINDER_EVERY", 45.0)
+    focus_session_minutes: float = _env_float("JARVIS_FOCUS_NUDGE", 90.0)
+
+    # --- interrupting you -----------------------------------------------
+    desktop_notifications: bool = _env_bool("JARVIS_DESKTOP_NOTIFICATIONS", True)
+    nudge_min_gap: float = _env_float("JARVIS_NUDGE_MIN_GAP", 900.0)
+    nudge_max_per_hour: int = _env_int("JARVIS_NUDGE_MAX_PER_HOUR", 3)
+    coaching_enabled: bool = _env_bool("JARVIS_COACHING", True)
+    coaching_interval: float = _env_float("JARVIS_COACHING_INTERVAL", 1800.0)
+
+    # --- learning -------------------------------------------------------
+    learning_enabled: bool = _env_bool("JARVIS_LEARNING", True)
+    learning_interval: float = _env_float("JARVIS_LEARNING_INTERVAL", 7200.0)
+
+    # --- news ------------------------------------------------------------
+    news_topics: str = _env("JARVIS_NEWS_TOPICS", "")
+
     # --- autonomy schedule ----------------------------------------------
     briefing_hour: int = _env_int("JARVIS_BRIEFING_HOUR", 8)
     briefing_minute: int = _env_int("JARVIS_BRIEFING_MINUTE", 0)
     venture_interval: float = _env_float("JARVIS_VENTURE_INTERVAL", 21600.0)
     task_worker_enabled: bool = _env_bool("JARVIS_TASK_WORKER", True)
+
+    @property
+    def allowed_roots(self) -> tuple[Path, ...]:
+        """Every directory the file tools may reach in safe mode."""
+        roots = [self.workspace.resolve()]
+        for raw in self.file_roots:
+            try:
+                roots.append(Path(raw).expanduser().resolve())
+            except OSError:
+                continue
+        return tuple(roots)
 
     @property
     def email_configured(self) -> bool:

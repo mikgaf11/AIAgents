@@ -13,13 +13,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .activity import ActivityMonitor
 from .autonomy import Autonomy
 from .cognition import Cognition
 from .config import CONFIG, PROJECT_ROOT
 from .connectors import email as email_connector
 from .core import Jarvis
 from .events import BUS
+from .learning import Learning
 from .memory import Memory
+from .notify import NOTIFIER
 from .tools import ToolRegistry
 from .triage import TriageEngine
 
@@ -29,8 +32,10 @@ memory = Memory(CONFIG.db_path)
 connector = email_connector.from_config(CONFIG)
 tools = ToolRegistry(memory, connector)
 jarvis = Jarvis(memory, tools)
+activity = ActivityMonitor(memory)
+learning = Learning(jarvis, activity)
 triage = TriageEngine(memory, connector, jarvis.client)
-autonomy = Autonomy(jarvis, triage)
+autonomy = Autonomy(jarvis, triage, activity=activity, learning=learning)
 cognition = Cognition(jarvis, autonomy)
 
 
@@ -38,14 +43,31 @@ cognition = Cognition(jarvis, autonomy)
 async def lifespan(_: FastAPI):
     if CONFIG.cognition_enabled:
         cognition.start()
+    activity.start()
     BUS.emit(
         "boot",
         name=CONFIG.assistant_name,
         online=jarvis.online,
-        model=CONFIG.model if jarvis.online else "offline",
+        model=jarvis.model if jarvis.online else "offline",
+        backend=jarvis.backend,
+        local=jarvis.local,
         safe_mode=CONFIG.safe_mode,
         email=triage.status(),
+        activity=activity.status(),
     )
+    if jarvis.local:
+        # A local model that isn't pulled yet fails every call with a 404,
+        # which reads as "JARVIS is broken" rather than "run one command".
+        async def check_local() -> None:
+            probe = await jarvis.client.probe()
+            if probe.get("ok"):
+                BUS.emit("backend_status", ok=True,
+                         detail=f"{jarvis.model} ready locally")
+            else:
+                BUS.emit("backend_status", ok=False, detail=probe.get("error", ""))
+                BUS.emit("error", message=f"Local model: {probe.get('error')}")
+
+        asyncio.create_task(check_local())
     if connector is not None and jarvis.online:
         # Verify the mailbox once at boot so a bad password surfaces now
         # rather than silently failing every poll.
@@ -64,6 +86,9 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         await cognition.stop()
+        await activity.stop()
+        if hasattr(jarvis.client, "aclose"):
+            await jarvis.client.aclose()
         memory.close()
 
 
@@ -233,6 +258,64 @@ async def run_routine(name: str) -> JSONResponse:
             asyncio.create_task(routine.run())
             return JSONResponse({"ok": True, "routine": name})
     return JSONResponse({"error": f"no routine '{name}'"}, status_code=404)
+
+
+# -- what you're doing ---------------------------------------------------
+
+
+@app.get("/api/activity")
+async def activity_view() -> JSONResponse:
+    return JSONResponse(
+        {
+            "monitor": activity.status(),
+            "today": await activity.today(),
+            "play_minutes": round(await activity.play_minutes(), 1),
+            "play_limit": CONFIG.play_limit_minutes,
+            "week": await memory.activity_breakdown(time.time() - 7 * 86400, 15),
+            "insights": await memory.list_insights(30),
+            "notifier": NOTIFIER.status(),
+        }
+    )
+
+
+@app.post("/api/insight/{insight_id}/forget")
+async def forget_insight(insight_id: int) -> JSONResponse:
+    """Delete something it concluded about you. Wrong beliefs must be erasable."""
+    ok = await memory.forget_insight(insight_id)
+    if ok:
+        await memory.add_feedback(
+            subject=f"insight #{insight_id}",
+            signal="rejected",
+            detail="User deleted this conclusion.",
+        )
+    return JSONResponse({"ok": ok})
+
+
+@app.post("/api/nudge/snooze")
+async def snooze(payload: dict[str, Any]) -> JSONResponse:
+    minutes = float(payload.get("minutes", 60))
+    NOTIFIER.snooze(minutes)
+    return JSONResponse({"ok": True, "muted_for": round(minutes * 60)})
+
+
+@app.post("/api/nudge/feedback")
+async def nudge_feedback(payload: dict[str, Any]) -> JSONResponse:
+    """Tell it whether a nudge was worth it, so the next one is better."""
+    signal = str(payload.get("signal", "")).strip().lower()
+    if signal not in ("helpful", "rejected"):
+        return JSONResponse({"error": "signal must be helpful or rejected"},
+                            status_code=400)
+    await memory.add_feedback(
+        subject="nudge", signal=signal, detail=str(payload.get("text", ""))[:400]
+    )
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/learning/mine")
+async def mine_now() -> JSONResponse:
+    """Run a learning pass immediately instead of waiting hours for one."""
+    written = await learning.mine()
+    return JSONResponse({"ok": True, "insights": written})
 
 
 # -- WebSocket -----------------------------------------------------------

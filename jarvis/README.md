@@ -17,12 +17,14 @@ when it speaks, a shockwave crosses the volume in time with the voice.
                            │ websocket│  (token + state stream)
 ┌─ python core ────────────▼──────────▼───────────────────-┐
 │  Jarvis        streaming turn loop, parallel tool rounds │
-│  Tools         files · shell · python · web · memory     │
+│  Tools         files · shell · python · web · desktop    │
 │  Memory        SQLite + FTS5, facts/episodes/goals       │
 │  Cognition     background reflection, proactive speech   │
+│  Activity      what you're doing, in app + title only    │
+│  Learning      patterns mined from it, fed back as context│
 └──────────────────────────┬──────────────────────────────-┘
                            │
-                    Claude Opus 5 (adaptive thinking)
+        Claude Opus 5  ──or──  a local model via Ollama (free)
 ```
 
 ## Install it once, then forget it exists
@@ -32,8 +34,8 @@ when it speaks, a shockwave crosses the volume in time with the voice.
 
 (Or from a terminal: `python3 install.py`.)
 
-It creates the virtual environment, installs dependencies, asks for your
-Anthropic API key once, and then:
+It creates the virtual environment, installs dependencies, asks once how you
+want it to think (Claude, or a free local model — see below), and then:
 
 - **starts JARVIS automatically when you log in**, restarting it if it ever dies
 - **adds a JARVIS icon** to your Applications / app menu / Desktop
@@ -117,6 +119,128 @@ Tune it in `.env`: `JARVIS_DEEP_REFLECTION` (seconds between passes on a static
 world), or `JARVIS_COGNITION=0` to switch the background mind off entirely and
 make it purely reactive.
 
+## Free, or better: pick a reasoning core
+
+There are two, and the installer asks which you want.
+
+**Claude** (`JARVIS_BACKEND=anthropic`). Far better reasoning, and the only
+option that gets you web search, long agentic tool chains that stay coherent,
+and thinking summaries rich enough to drive the deep-layer brain activity.
+Costs per token — see the running-cost section above.
+
+**A local model** (`JARVIS_BACKEND=ollama`). Free forever, runs entirely on
+your machine, nothing leaves it. Install [Ollama](https://ollama.com), then:
+
+```bash
+ollama pull llama3.1:8b      # ~5 GB, runs on 8 GB of RAM
+```
+
+That's the whole setup. JARVIS speaks Ollama's protocol through an adapter
+that presents the same surface as the Anthropic client, so tools, memory,
+autonomy and the HUD all work identically.
+
+Be honest with yourself about the tradeoff: an 8B model is noticeably weaker.
+It follows multi-step tool chains less reliably, its judgement about when to
+interrupt you is cruder, and it has no web search (that tool runs on
+Anthropic's infrastructure and has no local equivalent, so it's silently
+withheld rather than offered and broken). If you have a bigger machine,
+`llama3.1:70b` or `qwen2.5:32b` close much of the gap. Models that emit
+`<think>` blocks — deepseek-r1, qwen3 — get that text routed to the thinking
+stream, so the cognition panel works locally too.
+
+The default, `JARVIS_BACKEND=auto`, uses Claude when a key is present and
+falls back to the local model when it isn't. Start free, add a key later,
+change nothing else.
+
+## Watching you work
+
+With `JARVIS_ACTIVITY=1` (the default), JARVIS samples the **foreground
+application name and window title** every 20 seconds. That is the entire
+scope: no screenshots, no keystrokes, no page contents, no network capture.
+An app name and a window title are enough to know you spent two hours in a
+game or forty minutes in an editor, which is all the features below need.
+
+Everything stays in `jarvis/data/jarvis.db` on your machine. `JARVIS_ACTIVITY=0`
+switches it off completely.
+
+Sessions shorter than 45 seconds are discarded as alt-tab noise. Browsers are
+classified by what they're showing rather than by being a browser — a tab on
+YouTube counts as media, one on GitHub counts as code. To teach it your own
+apps, drop a JSON file at `data/activity_rules.json`:
+
+```json
+{"game": ["mygameclient"], "work": ["ourinternaltool"]}
+```
+
+The **Life** tab shows where today went, how it compares to your play limit,
+and every conclusion it has drawn about you — each with the evidence behind
+it and an **×** to delete it. Wrong beliefs have to be erasable, or the thing
+becomes annoying and then useless.
+
+### What "learning" means here, precisely
+
+Nothing on this machine retrains a model. Fine-tuning needs GPUs and a
+curated dataset, and on a single person's data it reliably makes a model
+*worse*, not better. Anyone telling you their assistant "learns by watching"
+in the weights sense is selling something.
+
+What actually happens is more useful and much cheaper: every couple of hours
+it reviews where your time went, what you asked for, and what you corrected,
+and writes down durable **insights** — "they code most between 9pm and 1am",
+"they abandon tasks queued on Fridays". Those are injected as context into
+every future conversation. The retrieval gets richer as the file grows, which
+is what makes it feel like it knows you. It is grounded in evidence you can
+read and delete, rather than in a black box.
+
+### Interrupting you
+
+Two things can interrupt: the **playtime register** and the **coach**.
+
+The playtime register is pure arithmetic — no model call, no judgement. Past
+`JARVIS_PLAY_LIMIT` minutes of game and media time in a day, it tells you the
+number once, then holds off for `JARVIS_PLAY_REMINDER_EVERY` minutes. It
+reports and gets out of the way; the point is to make time visible, not to
+police it.
+
+The coach is the model deciding whether right now is worth saying something
+about, given what you're doing, how long you've been at it, your goals, and
+what it knows about you. Its prompt makes silence the default and forbids
+checking in, praising, greeting, or nagging about the same thing twice.
+
+Both arrive as a **floating helix popup** that speaks aloud, plus a real OS
+notification so it lands even when the HUD is buried behind a game. Every
+nudge carries *Got it* / *Not helpful* / *Snooze*, and your answer is stored
+as feedback that shapes later ones.
+
+Interruptions are rate limited hard: a floor of `JARVIS_NUDGE_MIN_GAP`
+seconds between them and at most `JARVIS_NUDGE_MAX_PER_HOUR`. An assistant
+that interrupts freely gets muted within a day, which makes it worthless.
+
+## Reaching the rest of your machine
+
+Safe mode confines file access to `jarvis/workspace/`. That's the right
+default and the wrong place to stop — an assistant that can't touch your real
+files can't do much. Rather than making you choose between a sandbox and an
+unrestricted shell, name the folders you actually want it in:
+
+```bash
+JARVIS_FILE_ROOTS=~/Documents,~/Projects,~/Desktop
+```
+
+Safe mode stays on. Those directories become readable, writable and
+searchable; everything else is still refused, and traversal out of them is
+rejected. With that set it can find a file you half remember, open it, edit
+it, and put it back.
+
+It can also open files and folders with whatever app normally handles them,
+launch applications by name, and play music from `JARVIS_MUSIC_DIRS` or a
+streaming URL — including play/pause/skip against whatever is already
+playing, via media keys on Windows, MPRIS on Linux and AppleScript on macOS.
+Set `JARVIS_ALLOW_OPEN=0` if you'd rather it only read and wrote.
+
+Every one of those calls hands the OS an argv list, never a shell string, so
+a filename containing `;` opens a file instead of running a command.
+
 ## Connecting your email
 
 ```bash
@@ -161,14 +285,21 @@ not just by instructions.
 
 ## Working on its own
 
-Four things run in the background whether or not you're there:
+These run in the background whether or not you're there:
 
 | Routine | Cadence | What it does |
 |---|---|---|
 | Mail sweep | every 3 min | Fetch, triage, flag, and queue drafts for anything needing a reply |
 | Morning briefing | 08:00 daily | Spoken digest: what landed overnight, what deserves attention today |
+| News bulletin | 08:02 daily | Searches your topics, reads back what actually happened |
 | Venture review | every 6h | Propose and sharpen money-making opportunities |
 | Work queue | continuous | Execute queued tasks with full tools, then report back |
+| Playtime register | every minute | Free arithmetic on today's game and media time |
+| Coach | every 30 min | Decides whether right now is worth interrupting for; usually not |
+| Learning pass | every 2h | Mines your activity into insights fed back as context |
+
+The news bulletin is off until you name topics (`JARVIS_NEWS_TOPICS=AI,
+markets, Arsenal`) and needs web search, so it's a Claude-backend feature.
 
 The **work queue** is the interesting one. JARVIS can queue work for itself —
 research a question you left open, draft something you'll need, dig into a
@@ -199,7 +330,8 @@ honest.
 
 ## What it can actually do
 
-**Reasoning.** Claude Opus 5 with adaptive thinking and configurable effort.
+**Reasoning.** Claude Opus 5 with adaptive thinking and configurable effort,
+or a local model via Ollama for free.
 Thinking is requested as `display: "summarized"`, which is what feeds the
 Cognition Stream panel and the deep-layer brain activity — with the default
 (`omitted`) there would be nothing to show.
@@ -216,6 +348,11 @@ Cognition Stream panel and the deep-layer brain activity — with the default
 | `run_python` | In-process execution for calculation and analysis |
 | `shell` | Shell commands in the workspace |
 | `system_status` | CPU, memory, disk, uptime, battery |
+| `find_files` | Find a file by name anywhere it's allowed to look |
+| `open_path` / `launch_app` | Open a file, folder or URL; start an application |
+| `play_music` / `media_control` | Play a track or URL; pause/skip whatever is playing |
+| `activity_report` | Where your hours actually went, per app and category |
+| `notify_me` | Surface a helix popup and speak, even behind a fullscreen game |
 | `web_search` / `web_fetch` | Anthropic server-side tools, run on their infra |
 | `list_emails` / `read_email` / `search_email` | Its view of your triaged inbox |
 | `draft_reply` / `mark_email_handled` | Prepare replies for approval; clear the queue |
@@ -275,9 +412,16 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 
 | Variable | Default | Notes |
 |---|---|---|
+| `JARVIS_BACKEND` | `auto` | `auto` \| `anthropic` \| `ollama` |
 | `JARVIS_MODEL` | `claude-opus-5` | The reasoning core |
+| `JARVIS_OLLAMA_MODEL` | `llama3.1:8b` | Used when running locally |
 | `JARVIS_EFFORT` | `high` | `low`–`max`; `xhigh` for the hardest agentic work |
 | `JARVIS_SAFE_MODE` | `1` | See below |
+| `JARVIS_FILE_ROOTS` | *(empty)* | Extra folders reachable without leaving safe mode |
+| `JARVIS_ACTIVITY` | `1` | Watch the foreground app; `0` disables it entirely |
+| `JARVIS_PLAY_LIMIT` | `120` | Minutes of play before it says something |
+| `JARVIS_NUDGE_MIN_GAP` | `900` | Seconds between interruptions |
+| `JARVIS_NEWS_TOPICS` | *(empty)* | Topics for the morning bulletin |
 | `JARVIS_COGNITION_INTERVAL` | `45` | Seconds between reflection passes |
 | `JARVIS_PROACTIVE_AFTER_IDLE` | `120` | Silence required before it speaks first |
 
@@ -286,8 +430,8 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 On by default, and it is the difference between a demo and something with
 real reach:
 
-- File access is confined to `jarvis/workspace/`; paths are canonicalized and
-  traversal is rejected.
+- File access is confined to `jarvis/workspace/` plus anything you list in
+  `JARVIS_FILE_ROOTS`; paths are canonicalized and traversal is rejected.
 - Shell commands must be a single program from an allowlist, with no shell
   operators (`;`, `|`, `&`, backticks, redirection).
 - `run_python` blocks imports of `socket`, `subprocess`, `ctypes`, and
@@ -316,7 +460,7 @@ half-work with your real accounts.
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest tests/ -q      # 30 tests, no API key needed
+./.venv/bin/python -m pytest tests/ -q      # 174 tests, no API key needed
 ```
 
 The suite covers memory retrieval and FTS injection safety, tool sandboxing,
@@ -324,6 +468,13 @@ the event bus, and — via a scripted mock model — the real streaming tool loo
 parallel tool rounds, `pause_turn` resumption, refusal handling, usage
 accounting, history trimming that never orphans a `tool_result`, and the
 mid-conversation-system-message fallback.
+
+It also covers the parts that reach outside: activity classification and
+session accounting, nudge rate limiting, the playtime register firing once
+rather than every tick, path escapes out of an allowed root, filenames
+containing shell metacharacters, and the Ollama adapter's translation in both
+directions — driven by a stubbed HTTP transport, so no local model is needed
+to run it.
 
 ## Layout
 
@@ -340,6 +491,10 @@ jarvis/
 │   ├── triage.py      email classification against your priorities
 │   ├── connectors/    external services (email today; the seam for more)
 │   ├── cognition.py   the background mind
+│   ├── activity.py    foreground-app sampling and time accounting
+│   ├── learning.py    mines behaviour into insights; decides when to coach
+│   ├── notify.py      rate-limited nudges to the HUD and the desktop
+│   ├── backends/      Claude and Ollama behind one interface
 │   ├── memory.py      SQLite + FTS5 store and hybrid retrieval
 │   ├── tools.py       every capability, plus the safe-mode sandbox
 │   ├── persona.py     system prompts
@@ -350,6 +505,7 @@ jarvis/
 │   ├── js/brain.js    the WebGL neural core
 │   ├── js/hud.js      2D reticle overlay
 │   ├── js/voice.js    recognition, synthesis, amplitude
+│   ├── js/helix.js    the helix that appears when it interrupts you
 │   └── js/app.js      transport, panels, animation loop
 └── tests/
 ```

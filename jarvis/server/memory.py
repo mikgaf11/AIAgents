@@ -149,6 +149,44 @@ CREATE TABLE IF NOT EXISTS ventures (
     updated     REAL    NOT NULL
 );
 
+-- What you were doing, as app + window title only. No screenshots, no
+-- keystrokes, no page contents.
+CREATE TABLE IF NOT EXISTS activity (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started     REAL    NOT NULL,
+    seconds     REAL    NOT NULL,
+    app         TEXT    NOT NULL DEFAULT '',
+    title       TEXT    NOT NULL DEFAULT '',
+    category    TEXT    NOT NULL DEFAULT 'other'
+);
+CREATE INDEX IF NOT EXISTS idx_activity_started ON activity(started);
+
+-- Things it worked out about you by watching, rather than being told.
+-- Kept separate from facts so learned guesses never masquerade as
+-- statements you actually made.
+CREATE TABLE IF NOT EXISTS insights (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    topic       TEXT    NOT NULL,
+    insight     TEXT    NOT NULL,
+    evidence    TEXT    NOT NULL DEFAULT '',
+    confidence  REAL    NOT NULL DEFAULT 0.5,
+    kind        TEXT    NOT NULL DEFAULT 'pattern',
+    acted_on    INTEGER NOT NULL DEFAULT 0,
+    updated     REAL    NOT NULL
+);
+
+-- Corrections and reactions, which are the highest-signal training data
+-- an assistant like this can get.
+CREATE TABLE IF NOT EXISTS feedback (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    subject     TEXT    NOT NULL DEFAULT '',
+    signal      TEXT    NOT NULL,
+    detail      TEXT    NOT NULL DEFAULT '',
+    weight      REAL    NOT NULL DEFAULT 1.0
+);
+
 -- Per-connector bookkeeping, e.g. the highest mail UID already seen.
 CREATE TABLE IF NOT EXISTS connector_state (
     key         TEXT PRIMARY KEY,
@@ -577,6 +615,137 @@ class Memory:
             self._db.commit()
 
         await self._run(_write)
+
+    # -- activity --------------------------------------------------------
+
+    async def record_activity(
+        self, *, app: str, title: str, category: str, started: float, seconds: float
+    ) -> int:
+        def _write() -> int:
+            cur = self._db.execute(
+                "INSERT INTO activity (started, seconds, app, title, category)"
+                " VALUES (?,?,?,?,?)",
+                (started, seconds, app[:120], title[:300], category),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def activity_totals(self, since: float) -> dict[str, float]:
+        """Minutes per category since a timestamp."""
+
+        def _read() -> dict[str, float]:
+            rows = self._db.execute(
+                "SELECT category, SUM(seconds) AS total FROM activity"
+                " WHERE started >= ? GROUP BY category",
+                (since,),
+            ).fetchall()
+            return {r["category"]: (r["total"] or 0) / 60.0 for r in rows}
+
+        return await self._run(_read)
+
+    async def activity_breakdown(self, since: float, limit: int = 12) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT app, category, SUM(seconds) AS total, COUNT(*) AS sessions"
+                " FROM activity WHERE started >= ? GROUP BY app, category"
+                " ORDER BY total DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+            return [
+                {
+                    "app": r["app"], "category": r["category"],
+                    "minutes": round((r["total"] or 0) / 60.0, 1),
+                    "sessions": r["sessions"],
+                }
+                for r in rows
+            ]
+
+        return await self._run(_read)
+
+    async def recent_activity(self, limit: int = 40) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM activity ORDER BY started DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
+
+    # -- insights (learned, not told) ------------------------------------
+
+    async def add_insight(
+        self, topic: str, insight: str, *, evidence: str = "",
+        confidence: float = 0.5, kind: str = "pattern",
+    ) -> int:
+        def _write() -> int:
+            now = time.time()
+            existing = self._db.execute(
+                "SELECT id, confidence FROM insights WHERE topic = ?", (topic,)
+            ).fetchone()
+            if existing:
+                # Seeing the same pattern again is evidence for it.
+                boosted = min(0.98, max(float(existing["confidence"]), confidence) + 0.05)
+                self._db.execute(
+                    "UPDATE insights SET insight=?, evidence=?, confidence=?,"
+                    " updated=? WHERE id=?",
+                    (insight, evidence, boosted, now, existing["id"]),
+                )
+                self._db.commit()
+                return int(existing["id"])
+            cur = self._db.execute(
+                "INSERT INTO insights (ts, topic, insight, evidence, confidence,"
+                " kind, updated) VALUES (?,?,?,?,?,?,?)",
+                (now, topic, insight, evidence, confidence, kind, now),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def list_insights(self, limit: int = 30) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM insights ORDER BY confidence DESC, updated DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
+
+    async def forget_insight(self, insight_id: int) -> bool:
+        def _write() -> bool:
+            cur = self._db.execute("DELETE FROM insights WHERE id = ?", (insight_id,))
+            self._db.commit()
+            return cur.rowcount > 0
+
+        return await self._run(_write)
+
+    # -- feedback --------------------------------------------------------
+
+    async def add_feedback(
+        self, subject: str, signal: str, detail: str = "", weight: float = 1.0
+    ) -> int:
+        def _write() -> int:
+            cur = self._db.execute(
+                "INSERT INTO feedback (ts, subject, signal, detail, weight)"
+                " VALUES (?,?,?,?,?)",
+                (time.time(), subject[:200], signal, detail[:500], weight),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+        return await self._run(_write)
+
+    async def feedback_summary(self, limit: int = 40) -> list[dict[str, Any]]:
+        def _read() -> list[dict[str, Any]]:
+            rows = self._db.execute(
+                "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return await self._run(_read)
 
     # -- connector bookkeeping -------------------------------------------
 

@@ -825,6 +825,155 @@ body::before {
 .banner.visible { opacity: 1; transform: translate(-50%, 0); }
 .banner.error { color: var(--danger); border-color: rgba(255, 62, 107, 0.5); }
 
+/* ------------------------------------------------------ the helix nudge -- */
+
+.nudge {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 40;
+  width: min(400px, calc(100vw - 48px));
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 10px 4px;
+  background: rgba(5, 12, 20, 0.94);
+  backdrop-filter: var(--panel-blur);
+  -webkit-backdrop-filter: var(--panel-blur);
+  border: 1px solid var(--nudge-accent, var(--accent-soft));
+  border-left: 2px solid var(--nudge-accent, var(--accent));
+  box-shadow: 0 0 44px rgba(0, 0, 0, 0.8),
+              inset 0 0 30px rgba(56, 225, 255, 0.045);
+  opacity: 0;
+  transform: translateY(14px) scale(0.98);
+  pointer-events: none;
+  transition: opacity 0.32s ease, transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.nudge.visible { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+
+/* The kind of nudge sets the accent, so time and alerts read differently
+   from an ordinary suggestion before a word has been read. */
+.nudge[data-kind="playtime"] { --nudge-accent: var(--amber); }
+.nudge[data-kind="alert"]    { --nudge-accent: var(--danger); }
+.nudge[data-kind="reminder"] { --nudge-accent: #9b7cf6; }
+
+.nudge-helix { width: 60px; height: 108px; flex: 0 0 auto; align-self: center; }
+
+.nudge-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.nudge-head { display: flex; align-items: center; justify-content: space-between; }
+.nudge-kind {
+  font-size: 8.5px;
+  letter-spacing: 0.26em;
+  color: var(--nudge-accent, var(--accent));
+}
+.nudge-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.nudge-close:hover { color: var(--accent); }
+.nudge-text { font-size: 12.5px; line-height: 1.5; color: var(--text); }
+.nudge-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.nudge-actions button {
+  flex: 1 1 auto;
+  padding: 5px 8px;
+  font-family: var(--font);
+  font-size: 8.5px;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+.nudge-actions button:hover { color: var(--text); border-color: var(--accent-soft); }
+.nudge-ok:hover { color: var(--nudge-accent, var(--accent)); }
+.nudge-bad:hover { color: var(--danger); border-color: rgba(255, 62, 107, 0.5); }
+
+/* ------------------------------------------------------------ life panel -- */
+
+.sub-head {
+  margin: 12px 0 6px;
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: var(--text-dim);
+}
+
+.time-bars { display: flex; flex-direction: column; gap: 5px; }
+.time-row {
+  display: grid;
+  grid-template-columns: 54px 1fr 42px;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+}
+.time-label { color: var(--text-dim); letter-spacing: 0.1em; }
+.time-value { color: var(--text); text-align: right; }
+.time-bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.time-bar i { display: block; height: 100%; transition: width 0.5s ease; }
+
+.play-summary {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+.play-summary.over { color: var(--amber); }
+
+#activity-now[data-category="game"]  { color: var(--amber); }
+#activity-now[data-category="code"],
+#activity-now[data-category="work"]  { color: var(--accent); }
+
+.insight {
+  padding: 7px 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.insight-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 3px;
+}
+.insight-topic {
+  flex: 1;
+  min-width: 0;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insight-conf { font-size: 9px; color: var(--text-dim); }
+.insight-forget {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 1px;
+}
+.insight-forget:hover { color: var(--danger); }
+.insight-body { font-size: 11.5px; line-height: 1.45; color: var(--text); }
+.insight-evidence {
+  margin-top: 3px;
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 /* ------------------------------------------------------------ responsive -- */
 
 @media (max-width: 1180px) {
@@ -841,6 +990,7 @@ body::before {
 
 @media (max-width: 680px) {
   .panel-column { display: none; }
+  .nudge { right: 14px; left: 14px; bottom: 14px; width: auto; }
   .console { width: calc(100vw - 28px); min-width: 0; }
   .sub { display: none; }
   .readouts .readout:nth-child(n + 3) { display: none; }

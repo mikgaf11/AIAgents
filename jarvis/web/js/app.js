@@ -4,6 +4,7 @@
  */
 
 import { Brain } from "./brain.js";
+import { Helix } from "./helix.js";
 import { Hud } from "./hud.js";
 import { Voice } from "./voice.js";
 
@@ -57,6 +58,18 @@ const el = {
   voiceReset: $("voice-reset"),
   voiceClose: $("voice-close"),
   voiceHint: $("voice-hint"),
+  lifeBadge: $("life-badge"),
+  activityNow: $("activity-now"),
+  timeBars: $("time-bars"),
+  insightList: $("insight-list"),
+  nudge: $("nudge"),
+  nudgeHelix: $("nudge-helix"),
+  nudgeKind: $("nudge-kind"),
+  nudgeText: $("nudge-text"),
+  nudgeClose: $("nudge-close"),
+  nudgeOk: $("nudge-ok"),
+  nudgeBad: $("nudge-bad"),
+  nudgeSnooze: $("nudge-snooze"),
 };
 
 const PRIORITY_LABELS = ["noise", "low", "normal", "high", "critical"];
@@ -65,6 +78,7 @@ const PRIORITY_LABELS = ["noise", "low", "normal", "high", "critical"];
 
 const brain = new Brain(el.brain);
 const hud = new Hud(el.hud);
+const helix = new Helix(el.nudgeHelix);
 
 let socket = null;
 let reconnectDelay = 500;
@@ -150,7 +164,37 @@ function handleEvent(event) {
       break;
 
     case "boot":
-      banner(`${event.name} core online — ${event.model}`);
+      banner(
+        `${event.name} core online — ${event.model}`
+        + (event.local ? " (local, free)" : "")
+      );
+      break;
+
+    case "backend_status":
+      if (event.ok === false) banner(event.detail, true);
+      break;
+
+    case "nudge":
+      showNudge(event);
+      break;
+
+    case "nudge_suppressed":
+      // Not shown to the user — it's the rate limiter doing its job — but
+      // worth leaving a trace so "why didn't it say anything" is answerable.
+      addThought(`held back a nudge: ${event.text}`, "sys");
+      break;
+
+    case "activity":
+      renderActivityNow(event);
+      break;
+
+    case "insight":
+      addThought(`learned — ${event.topic}: ${event.text}`, "curious");
+      refreshLife();
+      break;
+
+    case "news":
+      showBriefing(event.text);
       break;
 
     case "state":
@@ -573,6 +617,158 @@ function renderVentures(ventures) {
   }
 }
 
+/* ------------------------------------------------------- the helix nudge -- */
+
+let lastNudge = "";
+
+function showNudge(event) {
+  lastNudge = event.text || "";
+  el.nudgeKind.textContent = (event.title || "JARVIS").toUpperCase();
+  el.nudgeText.textContent = lastNudge;
+  el.nudge.dataset.kind = event.tone || "coach";
+  helix.setKind(event.tone || "coach");
+  el.nudge.classList.add("visible");
+  helix.start();
+  if (event.speak !== false) voice.speak(lastNudge);
+  brain.ripple(0.8);
+  addThought(lastNudge, event.tone === "playtime" ? "concerned" : "curious");
+
+  // It disappears on its own — a nudge you have to dismiss is a chore.
+  clearTimeout(showNudge._timer);
+  showNudge._timer = setTimeout(hideNudge, 45000);
+}
+
+function hideNudge() {
+  clearTimeout(showNudge._timer);
+  el.nudge.classList.remove("visible");
+  helix.stop();
+}
+
+async function rateNudge(signal) {
+  hideNudge();
+  try {
+    await fetch("/api/nudge/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signal, text: lastNudge }),
+    });
+  } catch { /* feedback is best-effort */ }
+}
+
+el.nudgeClose.addEventListener("click", hideNudge);
+el.nudgeOk.addEventListener("click", () => rateNudge("helpful"));
+el.nudgeBad.addEventListener("click", () => rateNudge("rejected"));
+el.nudgeSnooze.addEventListener("click", async () => {
+  hideNudge();
+  await fetch("/api/nudge/snooze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minutes: 60 }),
+  }).catch(() => {});
+  banner("Quiet for an hour.");
+});
+
+/* --------------------------------------------------------- the life panel -- */
+
+const CATEGORY_HUE = {
+  game: 38, media: 300, code: 190, work: 150, comms: 265, browse: 210, other: 220,
+};
+
+function renderActivityNow(event) {
+  if (!event.app) return;
+  el.activityNow.textContent =
+    `▶ ${event.app} · ${event.category} · ${event.minutes}m`;
+  el.activityNow.dataset.category = event.category;
+}
+
+function renderLife(data) {
+  const today = data.today || {};
+  const total = Object.values(today).reduce((sum, v) => sum + v, 0);
+  const play = data.play_minutes || 0;
+  const limit = data.play_limit || 0;
+
+  el.lifeBadge.textContent = limit && play >= limit ? "!" : "";
+  el.lifeBadge.classList.toggle("hot", Boolean(limit && play >= limit));
+
+  const monitor = data.monitor || {};
+  if (!monitor.available) {
+    el.activityNow.textContent = monitor.note || "activity monitoring unavailable";
+    el.activityNow.classList.add("bad");
+  } else {
+    el.activityNow.classList.remove("bad");
+  }
+
+  el.timeBars.innerHTML = "";
+  const entries = Object.entries(today).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "nothing recorded today";
+    el.timeBars.appendChild(empty);
+  }
+  for (const [category, minutes] of entries) {
+    const row = document.createElement("div");
+    row.className = "time-row";
+    const width = total ? Math.round((minutes / total) * 100) : 0;
+    const hue = CATEGORY_HUE[category] ?? 220;
+    row.innerHTML =
+      `<span class="time-label"></span>` +
+      `<span class="time-bar"><i style="width:${width}%;background:hsl(${hue} 90% 55% / .75)"></i></span>` +
+      `<span class="time-value"></span>`;
+    row.querySelector(".time-label").textContent = category;
+    row.querySelector(".time-value").textContent =
+      minutes >= 60 ? `${(minutes / 60).toFixed(1)}h` : `${Math.round(minutes)}m`;
+    el.timeBars.appendChild(row);
+  }
+
+  if (limit) {
+    const summary = document.createElement("div");
+    summary.className = `play-summary${play >= limit ? " over" : ""}`;
+    summary.textContent =
+      `play ${Math.round(play)}m of ${Math.round(limit)}m limit`;
+    el.timeBars.appendChild(summary);
+  }
+
+  renderInsights(data.insights || []);
+}
+
+function renderInsights(insights) {
+  el.insightList.innerHTML = "";
+  if (!insights.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "nothing concluded yet — it needs a few days of watching";
+    el.insightList.appendChild(empty);
+    return;
+  }
+  for (const item of insights.slice(0, 30)) {
+    const node = document.createElement("div");
+    node.className = "insight";
+    const confidence = Math.round((item.confidence || 0) * 100);
+    node.innerHTML =
+      `<div class="insight-head"><span class="insight-topic"></span>` +
+      `<span class="insight-conf"></span>` +
+      `<button class="insight-forget" title="This is wrong — forget it">×</button></div>` +
+      `<div class="insight-body"></div>` +
+      `<div class="insight-evidence"></div>`;
+    node.querySelector(".insight-topic").textContent = item.topic;
+    node.querySelector(".insight-conf").textContent = `${confidence}%`;
+    node.querySelector(".insight-body").textContent = item.insight;
+    node.querySelector(".insight-evidence").textContent = item.evidence || "";
+    node.querySelector(".insight-forget").addEventListener("click", async () => {
+      await fetch(`/api/insight/${item.id}/forget`, { method: "POST" });
+      refreshLife();
+    });
+    el.insightList.appendChild(node);
+  }
+}
+
+async function refreshLife() {
+  try {
+    renderLife(await fetch("/api/activity").then((r) => r.json()));
+  } catch { /* link banner already reports outages */ }
+}
+
 function showBriefing(text) {
   el.briefingBody.textContent = text;
   el.briefing.classList.add("visible");
@@ -720,7 +916,9 @@ function formatTokens(totals) {
 function applyStatus(status) {
   if (!status) return;
   statusCache = status;
-  el.model.textContent = status.online ? status.model : "OFFLINE CORE";
+  el.model.textContent = status.online
+    ? status.model + (status.local ? " · local" : "")
+    : "OFFLINE CORE";
   el.model.classList.toggle("warn", !status.online);
   if (status.tokens) el.tokens.textContent = formatTokens(status.tokens);
   renderVitals(status);
@@ -863,16 +1061,24 @@ function frame(now) {
 
 // Exposed for debugging and for driving the visualization by hand:
 //   __jarvis.setState("thinking", 1)   __jarvis.brain.ripple()
-window.__jarvis = { brain, hud, voice, setState, submit, status: () => statusCache };
+window.__jarvis = {
+  brain, hud, helix, voice, setState, submit,
+  nudge: (text, tone = "coach") => showNudge({ text, tone, title: "JARVIS" }),
+  status: () => statusCache,
+};
+
+window.addEventListener("resize", () => helix.resize());
 
 connect();
 refreshStatus();
 refreshInbox();
 refreshWork();
+refreshLife();
 setInterval(refreshStatus, 6000);
-// Mail and background work change on their own schedule, so poll them
-// independently of the conversation.
+// Mail, background work and time tracking change on their own schedule, so
+// poll them independently of the conversation.
 setInterval(refreshInbox, 20000);
 setInterval(refreshWork, 15000);
+setInterval(refreshLife, 30000);
 requestAnimationFrame(frame);
 el.input.focus();

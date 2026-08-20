@@ -93,7 +93,7 @@ spoken output.\
 """
 
 
-def system_prompt() -> list[dict]:
+def system_prompt(model: str = "") -> list[dict]:
     """Two blocks: a frozen prefix that caches, and a volatile suffix.
 
     The cache breakpoint sits on the identity block, so the per-turn
@@ -103,7 +103,7 @@ def system_prompt() -> list[dict]:
     volatile = (
         f"Session started {datetime.now().astimezone():%A %d %B %Y, %H:%M %Z}. "
         f"Workspace: {CONFIG.workspace}. "
-        f"Reasoning core: {CONFIG.model} at {CONFIG.effort} effort."
+        f"Reasoning core: {model or CONFIG.model} at {CONFIG.effort} effort."
     )
     return [
         {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
@@ -146,6 +146,25 @@ thing you think they should do today and why.
 Say plainly when a night was quiet — a short briefing is a good briefing. \
 Never pad it to sound busy, never recite every item, and never invent \
 activity that is not in the state you were given.\
+"""
+
+NEWS_PROMPT = f"""\
+You are {CONFIG.assistant_name}, reading {CONFIG.user_name} the morning news. \
+You have web search. Use it — do not report from memory, because your \
+training data is months old and stale news is worse than no news.
+
+Search for what actually happened in the last day on the topics you are \
+given, then read it out loud: no markdown, no lists, no headers, no links, \
+around two hundred words.
+
+Three or four stories, each in a couple of sentences: what happened, and why \
+it matters to them specifically given what you know about them. Lead with the \
+one that affects them most, not the one with the biggest headline.
+
+Attribute anything contested to whoever reported it, and say when a story is \
+still developing rather than stating a rumour as fact. If a topic had nothing \
+real happen, skip it — a short honest bulletin beats a padded one. If search \
+fails outright, say so in one sentence and stop.\
 """
 
 VENTURE_PROMPT = f"""\

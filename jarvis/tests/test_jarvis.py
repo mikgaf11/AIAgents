@@ -146,7 +146,7 @@ def test_safe_mode_blocks_path_escape(tools):
     async def run():
         output, is_error = await tools.execute("read_file", {"path": "/etc/passwd"})
         if CONFIG.safe_mode:
-            assert is_error and "outside the workspace" in output
+            assert is_error and "outside the folders I'm allowed to touch" in output
         else:
             assert True  # safe mode disabled by the operator; nothing to assert
 

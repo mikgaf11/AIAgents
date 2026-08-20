@@ -24,7 +24,8 @@ from typing import Any, Awaitable, Callable
 from .agent import Agent
 from .config import CONFIG
 from .events import BUS
-from .persona import BRIEFING_PROMPT, VENTURE_PROMPT, WORKER_PROMPT
+from .notify import NOTIFIER
+from .persona import BRIEFING_PROMPT, NEWS_PROMPT, VENTURE_PROMPT, WORKER_PROMPT
 
 # Tools the background worker may reach for. Deliberately excludes anything
 # that talks to a person or changes the machine's state irreversibly.
@@ -62,13 +63,16 @@ class Routine:
 class Autonomy:
     """The scheduler and the worker."""
 
-    def __init__(self, jarvis, triage) -> None:
+    def __init__(self, jarvis, triage, activity=None, learning=None) -> None:
         self.jarvis = jarvis
         self.memory = jarvis.memory
         self.triage = triage
+        self.activity = activity
+        self.learning = learning
         self.routines: list[Routine] = []
         self.working_on: str | None = None
         self.completed = 0
+        self.play_warned_at = 0.0
         self._build_routines()
 
     def _build_routines(self) -> None:
@@ -76,9 +80,21 @@ class Autonomy:
             Routine("email", CONFIG.email_poll_interval, self.run_email_sweep),
             Routine("briefing", 0, self.run_briefing,
                     at_hour=CONFIG.briefing_hour, at_minute=CONFIG.briefing_minute),
+            Routine("news", 0, self.run_news,
+                    at_hour=CONFIG.briefing_hour,
+                    at_minute=min(CONFIG.briefing_minute + 2, 59),
+                    enabled=bool(CONFIG.news_topics.strip()) and CONFIG.enable_web),
             Routine("ventures", CONFIG.venture_interval, self.run_venture_review),
             Routine("worker", 45.0, self.run_task_queue,
                     enabled=CONFIG.task_worker_enabled),
+            # Watching the clock is cheap and never calls the model, so it can
+            # run often; the coach and the miner are expensive and do not.
+            Routine("playtime", 60.0, self.run_playtime_check,
+                    enabled=self.activity is not None),
+            Routine("coach", CONFIG.coaching_interval, self.run_coaching,
+                    enabled=self.learning is not None and CONFIG.coaching_enabled),
+            Routine("learning", CONFIG.learning_interval, self.run_learning,
+                    enabled=self.learning is not None and CONFIG.learning_enabled),
         ]
 
     # -- scheduling ------------------------------------------------------
@@ -177,6 +193,103 @@ class Autonomy:
         await self.memory.add_observation(f"Morning briefing delivered: {text[:200]}")
         await self.jarvis.speak_unprompted(text, reason="briefing")
 
+    async def run_news(self) -> None:
+        """A short spoken bulletin on the topics they said they care about."""
+        if not self.jarvis.online:
+            return
+
+        facts = await self.memory.all_facts(20)
+        goals = await self.memory.list_goals("open")
+        brief = "\n\n".join([
+            f"Topics to cover: {CONFIG.news_topics}",
+            "What you know about them (use it to judge what matters):\n"
+            + ("\n".join(f"  - {f['subject']}: {f['content'][:140]}" for f in facts)
+               or "  (very little)"),
+            "Their open goals:\n"
+            + ("\n".join(f"  - {g['title']}" for g in goals) or "  (none)"),
+            f"Today is {datetime.now():%A %d %B %Y}. Search for news from the "
+            "last twenty-four hours.",
+        ])
+
+        agent = Agent(
+            self.jarvis.client,
+            self.jarvis.tools,
+            model=self.jarvis.model,
+            effort="medium",
+            max_tokens=6000,
+            system=[{"type": "text", "text": NEWS_PROMPT,
+                     "cache_control": {"type": "ephemeral"}}],
+            channel="background",
+            tool_names=["note_observation"],
+            include_server_tools=True,
+        )
+        BUS.emit("work_start", title="Reading the morning news", origin="news")
+        try:
+            result = await agent.run([{"role": "user", "content": brief}])
+        except Exception as exc:  # noqa: BLE001
+            BUS.emit("work_end", title="News", ok=False, summary=str(exc)[:300])
+            return
+        if not result.text:
+            return
+        BUS.emit("work_end", title="News", ok=True, summary=result.text[:300])
+        BUS.emit("news", text=result.text)
+        await self.jarvis.speak_unprompted(result.text, reason="news")
+
+    async def run_playtime_check(self) -> None:
+        """Say something when play has run long. Pure arithmetic, no model call.
+
+        Deliberately not a lecture: it reports the number and gets out of the
+        way. The point is to make time visible, not to police it.
+        """
+        if self.activity is None or not CONFIG.activity_enabled:
+            return
+
+        minutes = await self.activity.play_minutes()
+        limit = CONFIG.play_limit_minutes
+        if minutes < limit:
+            # Back under the line (a new day, mostly) — re-arm the warning.
+            self.play_warned_at = 0.0
+            return
+
+        now = time.time()
+        if self.play_warned_at and (now - self.play_warned_at) < (
+            CONFIG.play_reminder_every * 60
+        ):
+            return
+
+        current = (self.activity.status().get("current") or {}).get("app", "")
+        hours = minutes / 60
+        spent = (
+            f"{hours:.1f} hours" if hours >= 1 else f"{round(minutes)} minutes"
+        )
+        goals = await self.memory.list_goals("open")
+        tail = f" Your open goal is still {goals[0]['title']}." if goals else ""
+        where = f", currently {current}" if current else ""
+        line = f"That's {spent} of play today{where}.{tail} Just so you know."
+
+        if await NOTIFIER.nudge(line, kind="playtime", title="Play time"):
+            self.play_warned_at = now
+            await self.memory.add_observation(
+                f"Flagged {round(minutes)} minutes of play time."
+            )
+
+    async def run_coaching(self) -> None:
+        """Ask the model whether right now is worth interrupting for."""
+        if self.learning is None or not NOTIFIER.may_nudge():
+            return
+        line = await self.learning.coach()
+        if line:
+            await NOTIFIER.nudge(line, kind="coach")
+
+    async def run_learning(self) -> None:
+        """One pass over recent behaviour, writing down what it concludes."""
+        if self.learning is None:
+            return
+        written = await self.learning.mine()
+        if written:
+            BUS.emit("work_end", title="Learning pass", ok=True,
+                     summary=f"{len(written)} insights updated")
+
     async def run_venture_review(self) -> None:
         """Look for ways the user could make money, grounded in their situation."""
         if not self.jarvis.online:
@@ -201,7 +314,7 @@ class Autonomy:
         agent = Agent(
             self.jarvis.client,
             self.jarvis.tools,
-            model=CONFIG.model,
+            model=self.jarvis.model,
             effort="medium",
             max_tokens=8000,
             system=[{"type": "text", "text": VENTURE_PROMPT,
@@ -248,7 +361,7 @@ class Autonomy:
         agent = Agent(
             self.jarvis.client,
             self.jarvis.tools,
-            model=CONFIG.model,
+            model=self.jarvis.model,
             effort="medium",
             max_tokens=12000,
             system=[{"type": "text", "text": WORKER_PROMPT,
@@ -283,7 +396,7 @@ class Autonomy:
         """A single toolless call, for jobs that just need prose back."""
         try:
             response = await self.jarvis.client.messages.create(
-                model=CONFIG.model,
+                model=self.jarvis.model,
                 max_tokens=max_tokens,
                 system=[{"type": "text", "text": system,
                          "cache_control": {"type": "ephemeral"}}],

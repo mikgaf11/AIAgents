@@ -271,7 +271,7 @@ class Cognition:
         BUS.emit("state", state="dreaming", intensity=0.4)
         try:
             response = await self.jarvis.client.messages.create(
-                model=CONFIG.background_model,
+                model=self.jarvis.background_model,
                 max_tokens=CONFIG.background_max_tokens,
                 system=[
                     {
