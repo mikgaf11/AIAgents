@@ -139,6 +139,78 @@ async def memory_dump() -> JSONResponse:
     )
 
 
+@app.get("/api/recall")
+async def recall(q: str = "", limit: int = 20) -> JSONResponse:
+    """Search everything it remembers. Backs the memory search box."""
+    query = q.strip()
+    if not query:
+        return JSONResponse({"hits": [], "query": ""})
+    hits = await memory.recall(query, limit)
+    return JSONResponse({
+        "query": query,
+        "hits": [
+            {"kind": h.kind, "text": h.text, "score": round(h.score, 3),
+             "when": h.ts, "rendered": h.render()}
+            for h in hits
+        ],
+    })
+
+
+@app.post("/api/remember")
+async def remember(payload: dict[str, Any]) -> JSONResponse:
+    """Quick capture: store a fact without spending a conversation turn."""
+    content = str(payload.get("content", "")).strip()
+    if not content:
+        return JSONResponse({"error": "content required"}, status_code=400)
+    fact_id = await memory.add_fact(
+        str(payload.get("subject", "")).strip() or content[:60],
+        content,
+        importance=float(payload.get("importance", 0.6)),
+        source="user",
+    )
+    BUS.emit("memory", op="store", detail=content[:90])
+    return JSONResponse({"ok": True, "id": fact_id})
+
+
+@app.post("/api/goal")
+async def add_goal(payload: dict[str, Any]) -> JSONResponse:
+    title = str(payload.get("title", "")).strip()
+    if not title:
+        return JSONResponse({"error": "title required"}, status_code=400)
+    goal_id = await memory.add_goal(title, str(payload.get("detail", "")))
+    BUS.emit("goal", id=goal_id, title=title)
+    return JSONResponse({"ok": True, "id": goal_id})
+
+
+@app.get("/api/today")
+async def today() -> JSONResponse:
+    """Everything the dashboard shows, in one round trip."""
+    emails = await memory.list_emails(limit=30, unhandled_only=True)
+    tasks = await memory.list_tasks(20)
+    return JSONResponse({
+        "state": jarvis.state,
+        "time": {k: round(v, 1) for k, v in (await activity.today()).items()},
+        "play": {
+            "minutes": round(await activity.play_minutes(), 1),
+            "limit": CONFIG.play_limit_minutes,
+        },
+        "goals": await memory.list_goals("open"),
+        "reminders": await memory.list_reminders(),
+        "mail": {
+            "unhandled": len(emails),
+            "urgent": len([e for e in emails if e["priority"] >= 3]),
+            "top": emails[:4],
+        },
+        "work": {
+            "running": autonomy.working_on,
+            "pending": len([t for t in tasks if t["status"] == "pending"]),
+            "done_today": autonomy.completed,
+        },
+        "insights": await memory.list_insights(6),
+        "observations": await memory.recent_observations(5),
+    })
+
+
 @app.post("/api/cognition/tick")
 async def force_tick() -> JSONResponse:
     """Run one reflection pass now instead of waiting for the timer."""
@@ -345,13 +417,12 @@ async def websocket(ws: WebSocket) -> None:
 
     pump_task = asyncio.create_task(pump())
     try:
+        # Replayed history is tagged so the browser can fill its panels
+        # without re-firing anything transient. Without this an old nudge
+        # or briefing pops up and speaks itself every time the HUD opens.
+        history = [{**event, "replay": True} for event in BUS.replay()[-40:]]
         await ws.send_text(
-            json.dumps(
-                [
-                    {"kind": "hello", "status": await jarvis.status()},
-                    *BUS.replay()[-40:],
-                ]
-            )
+            json.dumps([{"kind": "hello", "status": await jarvis.status()}, *history])
         )
         while True:
             raw = await ws.receive_text()

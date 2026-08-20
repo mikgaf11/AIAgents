@@ -1,6 +1,10 @@
 /*
- * The HUD application: websocket transport, panel rendering, voice wiring,
- * and the single animation loop that drives both canvases.
+ * The interface: websocket transport, the panel dock, the command palette,
+ * voice wiring, and the single animation loop that drives all three canvases.
+ *
+ * The brain owns the screen; everything here is chrome around it. Panels live
+ * in one dock driven by the icon rail, so only the view you asked for renders
+ * and the rest of the viewport stays on the core.
  */
 
 import { Brain } from "./brain.js";
@@ -13,14 +17,18 @@ const $ = (id) => document.getElementById(id);
 const el = {
   brain: $("brain-canvas"),
   hud: $("hud-canvas"),
-  state: $("state-label"),
+  stateLabel: $("state-label"),
   stateDot: $("state-dot"),
   model: $("stat-model"),
   latency: $("stat-latency"),
   rate: $("stat-rate"),
   tokens: $("stat-tokens"),
   fps: $("stat-fps"),
-  neurons: $("stat-neurons"),
+
+  dock: $("dock"),
+  dockTitle: $("dock-title"),
+  focusToggle: $("focus-toggle"),
+
   transcript: $("transcript"),
   input: $("composer-input"),
   send: $("composer-send"),
@@ -28,27 +36,55 @@ const el = {
   micLabel: $("mic-label"),
   speaker: $("speaker-button"),
   wake: $("wake-toggle"),
+  interim: $("interim"),
+  suggestions: $("suggestions"),
+  banner: $("banner"),
+
+  // today
+  todayHero: $("today-hero"),
+  todayTime: $("today-time"),
+  todayAttention: $("today-attention"),
+  todayNoticed: $("today-noticed"),
+
+  // mind
   thoughts: $("thought-stream"),
   tools: $("tool-trace"),
-  memory: $("memory-stream"),
-  goals: $("goal-list"),
-  vitals: $("vitals"),
   mood: $("mood-label"),
-  interim: $("interim"),
-  banner: $("banner"),
+  tickNow: $("tick-now"),
+
+  // inbox
   inboxList: $("inbox-list"),
-  inboxBadge: $("inbox-badge"),
   emailStatus: $("email-status"),
   draftList: $("draft-list"),
+
+  // work
   workList: $("work-list"),
   workNow: $("work-now"),
-  workBadge: $("work-badge"),
+  workForm: $("work-form"),
+  workInput: $("work-input"),
+
+  // life
+  activityNow: $("activity-now"),
+  timeBars: $("time-bars"),
+  insightList: $("insight-list"),
+  mineNow: $("mine-now"),
+
   ventureList: $("venture-list"),
-  briefing: $("briefing"),
-  briefingBody: $("briefing-body"),
-  briefingClose: $("briefing-close"),
-  voiceButton: $("voice-settings"),
-  voicePanel: $("voice-panel"),
+
+  // memory
+  recallForm: $("recall-form"),
+  recallInput: $("recall-input"),
+  recallResults: $("recall-results"),
+  captureForm: $("capture-form"),
+  captureInput: $("capture-input"),
+  goalForm: $("goal-form"),
+  goalInput: $("goal-input"),
+  goals: $("goal-list"),
+
+  // system
+  backendCard: $("backend-card"),
+  vitals: $("vitals"),
+  memoryStream: $("memory-stream"),
   voiceSelect: $("voice-select"),
   voiceRate: $("voice-rate"),
   voiceRateValue: $("voice-rate-value"),
@@ -56,12 +92,19 @@ const el = {
   voicePitchValue: $("voice-pitch-value"),
   voiceTest: $("voice-test"),
   voiceReset: $("voice-reset"),
-  voiceClose: $("voice-close"),
   voiceHint: $("voice-hint"),
-  lifeBadge: $("life-badge"),
-  activityNow: $("activity-now"),
-  timeBars: $("time-bars"),
-  insightList: $("insight-list"),
+
+  // palette
+  palette: $("palette"),
+  paletteOpen: $("palette-open"),
+  paletteInput: $("palette-input"),
+  paletteList: $("palette-list"),
+
+  // overlays
+  briefing: $("briefing"),
+  briefingTitle: $("briefing-title"),
+  briefingBody: $("briefing-body"),
+  briefingClose: $("briefing-close"),
   nudge: $("nudge"),
   nudgeHelix: $("nudge-helix"),
   nudgeKind: $("nudge-kind"),
@@ -70,9 +113,20 @@ const el = {
   nudgeOk: $("nudge-ok"),
   nudgeBad: $("nudge-bad"),
   nudgeSnooze: $("nudge-snooze"),
+
+  badges: {
+    today: $("badge-today"),
+    inbox: $("badge-inbox"),
+    work: $("badge-work"),
+    life: $("badge-life"),
+    system: $("badge-system"),
+  },
 };
 
 const PRIORITY_LABELS = ["noise", "low", "normal", "high", "critical"];
+const CATEGORY_HUE = {
+  game: 38, media: 300, code: 190, work: 150, comms: 265, browse: 210, other: 220,
+};
 
 /* ---------------------------------------------------------------- state -- */
 
@@ -83,10 +137,23 @@ const helix = new Helix(el.nudgeHelix);
 let socket = null;
 let reconnectDelay = 500;
 let currentState = "idle";
-let liveTurn = null; // the assistant bubble currently being streamed into
-let spokenSoFar = ""; // how much of the live reply has been sent to the voice
+let liveTurn = null;       // the assistant bubble currently being streamed into
+let spokenSoFar = "";      // how much of the live reply has been sent to the voice
 let pendingThought = "";
 let statusCache = {};
+let lastNudge = "";
+
+const store = {
+  get(key, fallback) {
+    try {
+      const raw = localStorage.getItem(`jarvis.${key}`);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(`jarvis.${key}`, JSON.stringify(value)); } catch {}
+  },
+};
 
 const voice = new Voice({
   onSpeech: (text) => {
@@ -154,9 +221,35 @@ function send(payload) {
   }
 }
 
+async function api(path, options) {
+  try {
+    const response = await fetch(path, options);
+    return await response.json();
+  } catch {
+    return null;  // the link banner already reports outages
+  }
+}
+
+const post = (path, body) => api(path, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body || {}),
+});
+
 /* ---------------------------------------------------------- event router -- */
 
+// Events replayed from history on connect fill the panels but must never
+// re-fire anything transient: an old nudge popping up and speaking itself
+// every time you open the window is maddening.
+const TRANSIENT = new Set(["nudge", "briefing", "news", "proactive"]);
+
 function handleEvent(event) {
+  if (event.replay && TRANSIENT.has(event.kind)) {
+    // Keep the record, drop the interruption.
+    if (event.kind === "proactive") addBubble("assistant", event.text, "proactive");
+    else if (event.kind === "nudge") addThought(event.text, "sys");
+    return;
+  }
   switch (event.kind) {
     case "hello":
     case "status":
@@ -164,37 +257,13 @@ function handleEvent(event) {
       break;
 
     case "boot":
-      banner(
-        `${event.name} core online — ${event.model}`
-        + (event.local ? " (local, free)" : "")
-      );
+      banner(`${event.name} online — ${event.model}`
+             + (event.local ? " · free, on this machine" : ""));
       break;
 
     case "backend_status":
       if (event.ok === false) banner(event.detail, true);
-      break;
-
-    case "nudge":
-      showNudge(event);
-      break;
-
-    case "nudge_suppressed":
-      // Not shown to the user — it's the rate limiter doing its job — but
-      // worth leaving a trace so "why didn't it say anything" is answerable.
-      addThought(`held back a nudge: ${event.text}`, "sys");
-      break;
-
-    case "activity":
-      renderActivityNow(event);
-      break;
-
-    case "insight":
-      addThought(`learned — ${event.topic}: ${event.text}`, "curious");
-      refreshLife();
-      break;
-
-    case "news":
-      showBriefing(event.text);
+      refreshStatus();
       break;
 
     case "state":
@@ -216,24 +285,12 @@ function handleEvent(event) {
       appendToLive(event.text);
       break;
 
-    case "tool_start":
-      addTool(event);
-      break;
+    case "tool_start": addTool(event); break;
+    case "tool_end": completeTool(event); break;
+    case "tool_args": break;  // streamed fragments; the trace shows the final input
+    case "tool_pause": addThought("server-side tool paused — resuming", "sys"); break;
 
-    case "tool_end":
-      completeTool(event);
-      break;
-
-    case "tool_args":
-      break; // streamed argument fragments; the trace shows the final input
-
-    case "tool_pause":
-      addThought("server-side tool paused — resuming", "sys");
-      break;
-
-    case "memory":
-      addMemory(event);
-      break;
+    case "memory": addMemory(event); break;
 
     case "cognition":
       addThought(event.text, event.mood || "calm");
@@ -241,8 +298,11 @@ function handleEvent(event) {
       break;
 
     case "email":
-      addInboxEntry(event);
+      addThought(`mail [${event.label}] ${event.sender}: ${event.subject}`,
+                 event.priority >= 3 ? "concerned" : "reason");
+      if (event.priority >= 3) brain.ripple(0.9);
       refreshInbox();
+      refreshToday();
       break;
 
     case "email_status":
@@ -265,21 +325,18 @@ function handleEvent(event) {
     case "work_end":
       el.workNow.textContent = "";
       el.workNow.classList.remove("busy");
-      addWorkResult(event);
+      addThought(`${event.ok ? "done" : "failed"}: ${event.title}`,
+                 event.ok ? "focused" : "error");
       refreshWork();
       break;
 
-    case "briefing":
-      showBriefing(event.text);
-      break;
+    case "briefing": showBriefing(event.text, "BRIEFING"); break;
+    case "news": showBriefing(event.text, "MORNING NEWS"); break;
 
     case "draft":
       refreshInbox();
-      banner(
-        event.status === "sent"
-          ? `Sent to ${event.to}`
-          : `Draft ${event.status}`
-      );
+      banner(event.status === "sent" ? `Sent to ${event.to}`
+                                     : `Draft ${event.status}`);
       break;
 
     case "proactive":
@@ -289,12 +346,27 @@ function handleEvent(event) {
       refreshStatus();
       break;
 
+    case "nudge": showNudge(event); break;
+
+    case "nudge_suppressed":
+      // Not shown to the user — the rate limiter doing its job — but worth a
+      // trace so "why didn't it say anything" is answerable.
+      addThought(`held back a nudge: ${event.text}`, "sys");
+      break;
+
+    case "activity": renderActivityNow(event); break;
+
+    case "insight":
+      addThought(`learned — ${event.topic}: ${event.text}`, "curious");
+      refreshLife();
+      break;
+
+    case "goal": refreshMemoryPanel(); break;
+
     case "usage":
       el.latency.textContent = `${event.latency_ms} ms`;
       el.rate.textContent = `${event.tokens_per_second} tok/s`;
-      if (event.totals) {
-        el.tokens.textContent = formatTokens(event.totals);
-      }
+      if (event.totals) el.tokens.textContent = formatTokens(event.totals);
       break;
 
     case "turn_end":
@@ -309,13 +381,44 @@ function handleEvent(event) {
   }
 }
 
-/* -------------------------------------------------------------- rendering -- */
+/* ------------------------------------------------------------ the shell -- */
+
+const VIEWS = ["today", "mind", "inbox", "work", "life", "ventures", "memory", "system"];
+let activeView = store.get("view", "today");
+
+function showView(name) {
+  if (!VIEWS.includes(name)) return;
+  activeView = name;
+  store.set("view", name);
+  for (const button of document.querySelectorAll(".rail-btn")) {
+    button.classList.toggle("active", button.dataset.view === name);
+  }
+  for (const section of document.querySelectorAll(".view")) {
+    section.classList.toggle("active", section.dataset.view === name);
+  }
+  el.dockTitle.textContent = name.toUpperCase();
+  if (document.body.classList.contains("focus")) setFocus(false);
+  REFRESHERS[name]?.();
+}
+
+for (const button of document.querySelectorAll(".rail-btn")) {
+  button.addEventListener("click", () => showView(button.dataset.view));
+}
+
+function setFocus(on) {
+  document.body.classList.toggle("focus", on);
+  store.set("focus", on);
+}
+el.focusToggle.addEventListener("click", () =>
+  setFocus(!document.body.classList.contains("focus"))
+);
 
 function setState(state, intensity = 0.5, tool = null) {
   currentState = state;
   brain.setState(state, intensity);
   hud.setState(state, intensity);
-  el.state.textContent = tool ? `${state.toUpperCase()} · ${tool}` : state.toUpperCase();
+  el.stateLabel.textContent = tool ? `${state.toUpperCase()} · ${tool}`
+                                   : state.toUpperCase();
   el.stateDot.dataset.state = state;
   document.body.dataset.state = state;
 }
@@ -328,6 +431,27 @@ function banner(message, isError = false) {
   banner._timer = setTimeout(() => el.banner.classList.remove("visible"), 4200);
 }
 
+function trimChildren(container, max) {
+  while (container.children.length > max) container.removeChild(container.firstChild);
+}
+
+function setBadge(name, value, hot = false) {
+  const node = el.badges[name];
+  if (!node) return;
+  node.textContent = value ? String(value) : "";
+  node.classList.toggle("hot", Boolean(hot));
+}
+
+function empty(container, message) {
+  container.innerHTML = "";
+  const node = document.createElement("div");
+  node.className = "empty";
+  node.textContent = message;
+  container.appendChild(node);
+}
+
+/* --------------------------------------------------------- conversation -- */
+
 function addBubble(role, text, extra = "") {
   const node = document.createElement("div");
   node.className = `bubble ${role} ${extra}`.trim();
@@ -337,6 +461,7 @@ function addBubble(role, text, extra = "") {
   el.transcript.appendChild(node);
   trimChildren(el.transcript, 60);
   el.transcript.scrollTop = el.transcript.scrollHeight;
+  el.suggestions.innerHTML = "";
   return node;
 }
 
@@ -353,8 +478,8 @@ function appendToLive(text) {
   el.transcript.scrollTop = el.transcript.scrollHeight;
   brain.ripple(0.5);
 
-  // Speak sentence by sentence as they complete, so the voice keeps pace
-  // with the stream instead of waiting for the whole reply.
+  // Speak sentence by sentence as they complete, so the voice keeps pace with
+  // the stream instead of waiting for the whole reply.
   const full = body.textContent;
   const unspoken = full.slice(spokenSoFar.length);
   const boundary = unspoken.search(/[.!?…](\s|$)/);
@@ -373,7 +498,6 @@ function finishLive(finalText) {
   if (finalText && finalText.length > body.textContent.length) {
     body.textContent = finalText;
   }
-  // Anything the sentence-splitter didn't reach gets spoken now.
   const remainder = body.textContent.slice(spokenSoFar.length).trim();
   if (remainder) voice.speak(remainder);
   liveTurn.classList.remove("streaming");
@@ -382,8 +506,8 @@ function finishLive(finalText) {
 }
 
 function flushThought() {
-  // Thinking arrives as a token stream; emit it in sentence-ish chunks so
-  // the panel reads as thoughts rather than a character firehose.
+  // Thinking arrives as a token stream; emit it in sentence-ish chunks so the
+  // panel reads as thoughts rather than a character firehose.
   const match = pendingThought.match(/^([\s\S]*?[.!?\n])\s/);
   if (match && match[1].trim().length > 12) {
     addThought(match[1].trim(), "reason");
@@ -400,7 +524,7 @@ function addThought(text, kind = "reason") {
   node.className = `thought ${kind}`;
   node.textContent = text;
   el.thoughts.appendChild(node);
-  trimChildren(el.thoughts, 40);
+  trimChildren(el.thoughts, 60);
   el.thoughts.scrollTop = el.thoughts.scrollHeight;
 }
 
@@ -413,7 +537,7 @@ function addTool(event) {
   node.querySelector(".tool-name").textContent = event.name;
   node.querySelector(".tool-arg").textContent = event.input || "";
   el.tools.appendChild(node);
-  trimChildren(el.tools, 30);
+  trimChildren(el.tools, 40);
   el.tools.scrollTop = el.tools.scrollHeight;
   brain.ripple(0.8);
 }
@@ -434,38 +558,134 @@ function addMemory(event) {
   node.querySelector(".op").textContent = event.op;
   node.querySelector(".detail").textContent =
     event.detail || (event.count != null ? `${event.count} hits` : "");
-  el.memory.appendChild(node);
-  trimChildren(el.memory, 25);
-  el.memory.scrollTop = el.memory.scrollHeight;
+  el.memoryStream.appendChild(node);
+  trimChildren(el.memoryStream, 30);
+  el.memoryStream.scrollTop = el.memoryStream.scrollHeight;
 }
 
-/* -------------------------------------------------------- inbox & work -- */
+/* --------------------------------------------------------------- today -- */
 
-function priorityName(value) {
-  return PRIORITY_LABELS[value] || "normal";
+function tile(label, value, sub = "", tone = "", wide = false) {
+  return `<div class="tile ${tone} ${wide ? "wide" : ""}">`
+    + `<span class="tile-label">${label}</span>`
+    + `<div class="tile-value">${value}</div>`
+    + (sub ? `<div class="tile-sub">${sub}</div>` : "")
+    + `</div>`;
 }
 
-function addInboxEntry(event) {
-  // Live arrival notice; the full list is re-rendered from the API.
-  addThought(
-    `mail [${event.label}] ${event.sender}: ${event.subject}`,
-    event.priority >= 3 ? "concerned" : "reason"
-  );
-  if (event.priority >= 3) brain.ripple(0.9);
+function renderToday(data) {
+  if (!data) return;
+  const mail = data.mail || {};
+  const work = data.work || {};
+  const play = data.play || {};
+  const goals = data.goals || [];
+  const overPlay = play.limit && play.minutes >= play.limit;
+
+  const focusMinutes = Object.entries(data.time || {})
+    .filter(([k]) => k === "code" || k === "work")
+    .reduce((sum, [, v]) => sum + v, 0);
+
+  el.todayHero.innerHTML = [
+    tile("NEEDS A REPLY", mail.unhandled ?? 0,
+         mail.urgent ? `${mail.urgent} urgent` : "nothing urgent",
+         mail.urgent ? "hot" : ""),
+    tile("FOCUSED WORK", formatMinutes(focusMinutes), "code and work apps"),
+    tile("PLAY", formatMinutes(play.minutes || 0),
+         play.limit ? `limit ${formatMinutes(play.limit)}` : "no limit set",
+         overPlay ? "warm" : ""),
+    tile("IN PROGRESS", work.pending ?? 0,
+         work.running ? String(work.running).slice(0, 40) : "queue is clear"),
+  ].join("");
+
+  renderTimeBars(el.todayTime, data.time || {}, null);
+
+  // "Needs you" merges the things that actually want a decision.
+  const attention = [];
+  for (const item of mail.top || []) {
+    attention.push({
+      tag: PRIORITY_LABELS[item.priority] || "normal",
+      tone: item.priority >= 4 ? "hot" : item.priority >= 3 ? "warm" : "",
+      text: `${item.sender} — ${item.subject}`,
+    });
+  }
+  for (const reminder of data.reminders || []) {
+    attention.push({ tag: "due", tone: "warm", text: reminder.text });
+  }
+  for (const goal of goals.slice(0, 3)) {
+    attention.push({
+      tag: `${Math.round((goal.progress || 0) * 100)}%`,
+      tone: "",
+      text: goal.title,
+    });
+  }
+  renderRows(el.todayAttention, attention, "nothing waiting on you");
+
+  const noticed = [
+    ...(data.insights || []).map((i) => ({ tag: "learned", tone: "", text: i.insight })),
+    ...(data.observations || []).map((o) => ({ tag: "noted", tone: "", text: o.text })),
+  ];
+  renderRows(el.todayNoticed, noticed.slice(0, 8), "nothing noted yet");
+
+  setBadge("today", mail.urgent || 0, mail.urgent > 0);
 }
+
+function renderRows(container, rows, emptyMessage) {
+  container.innerHTML = "";
+  if (!rows.length) return empty(container, emptyMessage);
+  for (const row of rows.slice(0, 10)) {
+    const node = document.createElement("div");
+    node.className = "row-item";
+    node.innerHTML = `<span class="row-tag ${row.tone}"></span><span class="row-text"></span>`;
+    node.querySelector(".row-tag").textContent = row.tag;
+    node.querySelector(".row-text").textContent = row.text;
+    container.appendChild(node);
+  }
+}
+
+const formatMinutes = (m) =>
+  m >= 60 ? `${(m / 60).toFixed(1)}h` : `${Math.round(m || 0)}m`;
+
+function renderTimeBars(container, today, playInfo) {
+  container.innerHTML = "";
+  const entries = Object.entries(today).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((sum, [, v]) => sum + v, 0);
+  if (!entries.length) return empty(container, "nothing recorded today");
+
+  for (const [category, minutes] of entries) {
+    const row = document.createElement("div");
+    row.className = "time-row";
+    const width = total ? Math.round((minutes / total) * 100) : 0;
+    const hue = CATEGORY_HUE[category] ?? 220;
+    row.innerHTML =
+      `<span class="time-label"></span>`
+      + `<span class="time-bar"><i style="width:${width}%;background:hsl(${hue} 90% 55% / .8)"></i></span>`
+      + `<span class="time-value"></span>`;
+    row.querySelector(".time-label").textContent = category;
+    row.querySelector(".time-value").textContent = formatMinutes(minutes);
+    container.appendChild(row);
+  }
+
+  if (playInfo && playInfo.limit) {
+    const summary = document.createElement("div");
+    summary.className = `play-summary${playInfo.minutes >= playInfo.limit ? " over" : ""}`;
+    summary.textContent =
+      `play ${Math.round(playInfo.minutes)}m of ${Math.round(playInfo.limit)}m limit`;
+    container.appendChild(summary);
+  }
+}
+
+/* ---------------------------------------------------------------- inbox -- */
 
 function renderInbox(data) {
+  if (!data) return;
   const messages = data.messages || [];
   const unhandled = messages.filter((m) => !m.handled);
   const urgent = unhandled.filter((m) => m.priority >= 3);
-
-  el.inboxBadge.textContent = urgent.length ? String(urgent.length) : "";
-  el.inboxBadge.classList.toggle("hot", urgent.length > 0);
+  setBadge("inbox", unhandled.length, urgent.length > 0);
 
   const status = data.email || {};
   if (!status.configured) {
-    el.emailStatus.innerHTML =
-      'not connected — run <code>python3 connect.py</code>';
+    el.emailStatus.innerHTML = 'not connected — run <code>python3 connect.py</code>';
     el.emailStatus.classList.add("bad");
   } else if (status.error) {
     el.emailStatus.textContent = status.error;
@@ -483,31 +703,26 @@ function renderInbox(data) {
 
   el.inboxList.innerHTML = "";
   if (!unhandled.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = status.configured ? "inbox clear" : "no mail connected";
-    el.inboxList.appendChild(empty);
-    return;
+    return empty(el.inboxList, status.configured ? "inbox clear" : "no mail connected");
   }
-
   for (const message of unhandled.slice(0, 30)) {
     const node = document.createElement("div");
     node.className = `mail p${message.priority}`;
     node.innerHTML =
-      `<div class="mail-head">` +
-      `<span class="mail-priority"></span>` +
-      `<span class="mail-from"></span>` +
-      `<button class="mail-done" title="Mark handled">✓</button></div>` +
-      `<div class="mail-subject"></div>` +
-      `<div class="mail-summary"></div>`;
-    node.querySelector(".mail-priority").textContent = priorityName(message.priority);
+      `<div class="mail-head"><span class="mail-priority"></span>`
+      + `<span class="mail-from"></span>`
+      + `<button class="mail-done" title="Mark handled">✓</button></div>`
+      + `<div class="mail-subject"></div><div class="mail-summary"></div>`;
+    node.querySelector(".mail-priority").textContent =
+      PRIORITY_LABELS[message.priority] || "normal";
     node.querySelector(".mail-from").textContent = message.sender;
     node.querySelector(".mail-subject").textContent = message.subject;
     node.querySelector(".mail-summary").textContent =
       message.summary + (message.action ? ` → ${message.action}` : "");
     node.querySelector(".mail-done").addEventListener("click", async () => {
-      await fetch(`/api/email/handled/${message.id}`, { method: "POST" });
+      await post(`/api/email/handled/${message.id}`);
       refreshInbox();
+      refreshToday();
     });
     el.inboxList.appendChild(node);
   }
@@ -519,44 +734,34 @@ function renderDrafts(drafts) {
     const node = document.createElement("div");
     node.className = "draft";
     node.innerHTML =
-      `<div class="draft-head">DRAFT → <span class="draft-to"></span></div>` +
-      `<div class="draft-subject"></div>` +
-      `<div class="draft-body"></div>` +
-      `<div class="draft-actions">` +
-      `<button class="approve">APPROVE &amp; SEND</button>` +
-      `<button class="discard">DISCARD</button></div>`;
+      `<div class="draft-head">DRAFT → <span class="draft-to"></span></div>`
+      + `<div class="draft-subject"></div><div class="draft-body"></div>`
+      + `<div class="draft-actions"><button class="approve">APPROVE &amp; SEND</button>`
+      + `<button class="discard">DISCARD</button></div>`;
     node.querySelector(".draft-to").textContent = draft.to_addr;
     node.querySelector(".draft-subject").textContent = draft.subject;
     node.querySelector(".draft-body").textContent = draft.body;
 
     node.querySelector(".approve").addEventListener("click", async () => {
-      const response = await fetch(`/api/draft/${draft.id}/approve`, { method: "POST" });
-      if (!response.ok) {
-        const detail = await response.json().catch(() => ({}));
-        banner(detail.error || "Could not send", true);
-      }
+      const result = await api(`/api/draft/${draft.id}/approve`, { method: "POST" });
+      if (result && result.error) banner(result.error, true);
       refreshInbox();
     });
     node.querySelector(".discard").addEventListener("click", async () => {
-      await fetch(`/api/draft/${draft.id}/discard`, { method: "POST" });
+      await post(`/api/draft/${draft.id}/discard`);
       refreshInbox();
     });
     el.draftList.appendChild(node);
   }
 }
 
-function addWorkResult(event) {
-  addThought(
-    `${event.ok ? "done" : "failed"}: ${event.title}`,
-    event.ok ? "focused" : "error"
-  );
-}
+/* ----------------------------------------------------------------- work -- */
 
 function renderWork(data) {
+  if (!data) return;
   const tasks = data.tasks || [];
   const pending = tasks.filter((t) => t.status === "pending" || t.status === "running");
-  el.workBadge.textContent = pending.length ? String(pending.length) : "";
-  el.workBadge.classList.toggle("hot", pending.some((t) => t.status === "running"));
+  setBadge("work", pending.length, pending.some((t) => t.status === "running"));
 
   const working = (data.autonomy || {}).working_on;
   if (working) {
@@ -567,48 +772,39 @@ function renderWork(data) {
   }
 
   el.workList.innerHTML = "";
-  if (!tasks.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "nothing queued";
-    el.workList.appendChild(empty);
-    return;
-  }
-  for (const task of tasks.slice(0, 20)) {
+  if (!tasks.length) return empty(el.workList, "nothing queued");
+  for (const task of tasks.slice(0, 25)) {
     const node = document.createElement("div");
     node.className = `task ${task.status}`;
     node.innerHTML =
-      `<div class="task-head"><span class="task-status"></span>` +
-      `<span class="task-title"></span></div>` +
-      (task.result ? `<div class="task-result"></div>` : "");
+      `<div class="task-head"><span class="task-status"></span>`
+      + `<span class="task-title"></span></div>`
+      + (task.result ? `<div class="task-result"></div>` : "");
     node.querySelector(".task-status").textContent = task.status;
     node.querySelector(".task-title").textContent = task.title;
     if (task.result) node.querySelector(".task-result").textContent = task.result;
     el.workList.appendChild(node);
   }
+
+  renderVentures(data.ventures || []);
 }
 
 function renderVentures(ventures) {
   el.ventureList.innerHTML = "";
   if (!ventures.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "no opportunities tracked yet";
-    el.ventureList.appendChild(empty);
-    return;
+    return empty(el.ventureList, "no opportunities tracked yet");
   }
   for (const venture of ventures.slice(0, 20)) {
     const node = document.createElement("div");
     node.className = `venture ${venture.status}`;
-    const confidence = Math.round((venture.confidence || 0) * 100);
     node.innerHTML =
-      `<div class="venture-head"><span class="venture-title"></span>` +
-      `<span class="venture-conf"></span></div>` +
-      `<div class="venture-meta"></div>` +
-      `<div class="venture-thesis"></div>` +
-      `<div class="venture-next"><b>next</b> <span></span></div>`;
+      `<div class="venture-head"><span class="venture-title"></span>`
+      + `<span class="venture-conf"></span></div>`
+      + `<div class="venture-meta"></div><div class="venture-thesis"></div>`
+      + `<div class="venture-next"><b>next</b> <span></span></div>`;
     node.querySelector(".venture-title").textContent = venture.title;
-    node.querySelector(".venture-conf").textContent = `${confidence}%`;
+    node.querySelector(".venture-conf").textContent =
+      `${Math.round((venture.confidence || 0) * 100)}%`;
     node.querySelector(".venture-meta").textContent =
       `${venture.status} · ${venture.effort} effort · ${venture.horizon}`;
     node.querySelector(".venture-thesis").textContent = venture.thesis || "";
@@ -617,9 +813,229 @@ function renderVentures(ventures) {
   }
 }
 
-/* ------------------------------------------------------- the helix nudge -- */
+el.workForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const title = el.workInput.value.trim();
+  if (!title) return;
+  el.workInput.value = "";
+  await post("/api/work/queue", { title });
+  banner("Queued.");
+  refreshWork();
+});
 
-let lastNudge = "";
+/* ----------------------------------------------------------------- life -- */
+
+function renderActivityNow(event) {
+  if (!event.app) return;
+  el.activityNow.textContent = `▶ ${event.app} · ${event.category} · ${event.minutes}m`;
+  el.activityNow.dataset.category = event.category;
+}
+
+function renderLife(data) {
+  if (!data) return;
+  const play = data.play_minutes || 0;
+  const limit = data.play_limit || 0;
+  setBadge("life", limit && play >= limit ? "!" : "", limit && play >= limit);
+
+  const monitor = data.monitor || {};
+  if (!monitor.available) {
+    el.activityNow.textContent = monitor.note || "activity monitoring unavailable";
+    el.activityNow.classList.add("bad");
+  } else {
+    el.activityNow.classList.remove("bad");
+  }
+
+  renderTimeBars(el.timeBars, data.today || {}, { minutes: play, limit });
+  renderInsights(data.insights || []);
+}
+
+function renderInsights(insights) {
+  el.insightList.innerHTML = "";
+  if (!insights.length) {
+    return empty(el.insightList,
+                 "nothing concluded yet — it needs a few days of watching");
+  }
+  for (const item of insights.slice(0, 30)) {
+    const node = document.createElement("div");
+    node.className = "insight";
+    node.innerHTML =
+      `<div class="insight-head"><span class="insight-topic"></span>`
+      + `<span class="insight-conf"></span>`
+      + `<button class="insight-forget" title="This is wrong — forget it">×</button></div>`
+      + `<div class="insight-body"></div><div class="insight-evidence"></div>`;
+    node.querySelector(".insight-topic").textContent = item.topic;
+    node.querySelector(".insight-conf").textContent =
+      `${Math.round((item.confidence || 0) * 100)}%`;
+    node.querySelector(".insight-body").textContent = item.insight;
+    node.querySelector(".insight-evidence").textContent = item.evidence || "";
+    node.querySelector(".insight-forget").addEventListener("click", async () => {
+      await post(`/api/insight/${item.id}/forget`);
+      refreshLife();
+    });
+    el.insightList.appendChild(node);
+  }
+}
+
+el.mineNow.addEventListener("click", async () => {
+  banner("Reviewing what you've been doing…");
+  const result = await post("/api/learning/mine");
+  banner(result && result.insights
+    ? `${result.insights.length} insight${result.insights.length === 1 ? "" : "s"} updated`
+    : "Nothing new concluded.");
+  refreshLife();
+});
+
+el.tickNow.addEventListener("click", async () => {
+  await post("/api/cognition/tick");
+  banner("Reflection pass run.");
+});
+
+/* --------------------------------------------------------------- memory -- */
+
+el.recallForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await runRecall(el.recallInput.value.trim());
+});
+
+async function runRecall(query) {
+  if (!query) return;
+  const data = await api(`/api/recall?q=${encodeURIComponent(query)}`);
+  el.recallResults.innerHTML = "";
+  const hits = (data && data.hits) || [];
+  if (!hits.length) return empty(el.recallResults, `nothing recalled for “${query}”`);
+  for (const hit of hits) {
+    const node = document.createElement("div");
+    node.className = "row-item";
+    node.innerHTML = `<span class="row-tag"></span><span class="row-text"></span>`;
+    node.querySelector(".row-tag").textContent = hit.kind;
+    node.querySelector(".row-text").textContent = hit.text;
+    node.title = `score ${hit.score}`;
+    el.recallResults.appendChild(node);
+  }
+}
+
+el.captureForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const content = el.captureInput.value.trim();
+  if (!content) return;
+  el.captureInput.value = "";
+  await post("/api/remember", { content });
+  banner("Stored.");
+});
+
+el.goalForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const title = el.goalInput.value.trim();
+  if (!title) return;
+  el.goalInput.value = "";
+  await post("/api/goal", { title });
+  banner("Objective set.");
+  refreshMemoryPanel();
+});
+
+function renderGoals(goals) {
+  const open = goals.filter((g) => g.status === "open").slice(0, 10);
+  el.goals.innerHTML = "";
+  if (!open.length) {
+    const node = document.createElement("div");
+    node.className = "goal empty";
+    node.textContent = "no active objectives";
+    return el.goals.appendChild(node);
+  }
+  for (const goal of open) {
+    const node = document.createElement("div");
+    node.className = "goal";
+    node.innerHTML =
+      `<span class="goal-title"></span>`
+      + `<span class="goal-bar"><i style="width:${Math.round((goal.progress || 0) * 100)}%"></i></span>`;
+    node.querySelector(".goal-title").textContent = `#${goal.id} ${goal.title}`;
+    el.goals.appendChild(node);
+  }
+}
+
+/* --------------------------------------------------------------- system -- */
+
+function applyStatus(status) {
+  if (!status) return;
+  statusCache = status;
+
+  // Online means "a backend is configured"; reachable means it actually
+  // answers. A local model that was never pulled is the difference.
+  const usable = status.online && status.reachable !== false;
+  el.model.textContent = !status.online ? "OFFLINE"
+    : usable ? shortModel(status.model) : "UNREACHABLE";
+  el.model.classList.toggle("warn", !usable);
+  el.model.title = usable ? (status.model || "") : (status.backend_error || "");
+
+  if (status.tokens) el.tokens.textContent = formatTokens(status.tokens);
+  renderVitals(status);
+  renderBackendCard(status);
+  setBadge("system", usable ? "" : "!", true);
+}
+
+const shortModel = (name = "") =>
+  name.replace(/^claude-/, "").replace(/:latest$/, "");
+
+function renderBackendCard(status) {
+  const usable = status.online && status.reachable !== false;
+  const paid = status.online && !status.local;
+  el.backendCard.className = `card${usable ? "" : " bad"}`;
+  if (!status.online) {
+    el.backendCard.innerHTML =
+      `<b>No reasoning core</b><br>The interface runs, but it cannot think.`
+      + `<span class="hint">free:  ollama pull llama3.1:8b`
+      + `<br>or put ANTHROPIC_API_KEY in jarvis/.env</span>`;
+  } else if (!usable) {
+    el.backendCard.innerHTML = `<b>Unreachable</b><br>`
+      + `<span class="hint"></span>`;
+    el.backendCard.querySelector(".hint").textContent = status.backend_error || "";
+  } else {
+    el.backendCard.innerHTML =
+      `<b>${status.model}</b><br>`
+      + (paid ? "Anthropic API — billed per token."
+              : "Running on this machine — free.")
+      + `<span class="hint">switch:  python3 backend.py `
+      + `${paid ? "local" : "claude"}</span>`;
+  }
+}
+
+function renderVitals(status) {
+  const host = status.host || {};
+  const memory = status.memory || {};
+  const pct = (v) => (v == null ? null : Math.max(0, Math.min(100, v)));
+  const rows = [
+    ["CPU", host.cpu_percent != null ? `${host.cpu_percent}%` : "—", pct(host.cpu_percent)],
+    ["MEMORY", host.memory_percent != null ? `${host.memory_percent}%` : "—", pct(host.memory_percent)],
+    ["DISK", host.disk_percent != null ? `${host.disk_percent}%` : "—", pct(host.disk_percent)],
+    ["FACTS", memory.facts ?? 0, null],
+    ["EPISODES", memory.episodes ?? 0, null],
+    ["SAFE MODE", status.safe_mode ? "ON" : "OFF", null],
+    ["TOOLS", (status.tools || []).length, null],
+  ];
+  if (host.battery_percent != null) {
+    rows.splice(3, 0, ["POWER", `${host.battery_percent}%`, pct(host.battery_percent)]);
+  }
+  el.vitals.innerHTML = "";
+  for (const [label, value, fraction] of rows) {
+    const row = document.createElement("div");
+    row.className = "vital";
+    row.innerHTML =
+      `<span class="vital-label"></span><span class="vital-value"></span>`
+      + (fraction != null
+          ? `<span class="vital-bar"><i style="width:${fraction}%"></i></span>` : "");
+    row.querySelector(".vital-label").textContent = label;
+    row.querySelector(".vital-value").textContent = value;
+    el.vitals.appendChild(row);
+  }
+}
+
+function formatTokens(totals) {
+  const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  return `${compact(totals.input || 0)}↓ ${compact(totals.output || 0)}↑`
+    + (totals.cache_read ? ` ${compact(totals.cache_read)}⚡` : "");
+}
+
+/* ------------------------------------------------------- the helix nudge -- */
 
 function showNudge(event) {
   lastNudge = event.text || "";
@@ -646,13 +1062,7 @@ function hideNudge() {
 
 async function rateNudge(signal) {
   hideNudge();
-  try {
-    await fetch("/api/nudge/feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ signal, text: lastNudge }),
-    });
-  } catch { /* feedback is best-effort */ }
+  await post("/api/nudge/feedback", { signal, text: lastNudge });
 }
 
 el.nudgeClose.addEventListener("click", hideNudge);
@@ -660,137 +1070,172 @@ el.nudgeOk.addEventListener("click", () => rateNudge("helpful"));
 el.nudgeBad.addEventListener("click", () => rateNudge("rejected"));
 el.nudgeSnooze.addEventListener("click", async () => {
   hideNudge();
-  await fetch("/api/nudge/snooze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ minutes: 60 }),
-  }).catch(() => {});
+  await post("/api/nudge/snooze", { minutes: 60 });
   banner("Quiet for an hour.");
 });
 
-/* --------------------------------------------------------- the life panel -- */
-
-const CATEGORY_HUE = {
-  game: 38, media: 300, code: 190, work: 150, comms: 265, browse: 210, other: 220,
-};
-
-function renderActivityNow(event) {
-  if (!event.app) return;
-  el.activityNow.textContent =
-    `▶ ${event.app} · ${event.category} · ${event.minutes}m`;
-  el.activityNow.dataset.category = event.category;
-}
-
-function renderLife(data) {
-  const today = data.today || {};
-  const total = Object.values(today).reduce((sum, v) => sum + v, 0);
-  const play = data.play_minutes || 0;
-  const limit = data.play_limit || 0;
-
-  el.lifeBadge.textContent = limit && play >= limit ? "!" : "";
-  el.lifeBadge.classList.toggle("hot", Boolean(limit && play >= limit));
-
-  const monitor = data.monitor || {};
-  if (!monitor.available) {
-    el.activityNow.textContent = monitor.note || "activity monitoring unavailable";
-    el.activityNow.classList.add("bad");
-  } else {
-    el.activityNow.classList.remove("bad");
-  }
-
-  el.timeBars.innerHTML = "";
-  const entries = Object.entries(today).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "nothing recorded today";
-    el.timeBars.appendChild(empty);
-  }
-  for (const [category, minutes] of entries) {
-    const row = document.createElement("div");
-    row.className = "time-row";
-    const width = total ? Math.round((minutes / total) * 100) : 0;
-    const hue = CATEGORY_HUE[category] ?? 220;
-    row.innerHTML =
-      `<span class="time-label"></span>` +
-      `<span class="time-bar"><i style="width:${width}%;background:hsl(${hue} 90% 55% / .75)"></i></span>` +
-      `<span class="time-value"></span>`;
-    row.querySelector(".time-label").textContent = category;
-    row.querySelector(".time-value").textContent =
-      minutes >= 60 ? `${(minutes / 60).toFixed(1)}h` : `${Math.round(minutes)}m`;
-    el.timeBars.appendChild(row);
-  }
-
-  if (limit) {
-    const summary = document.createElement("div");
-    summary.className = `play-summary${play >= limit ? " over" : ""}`;
-    summary.textContent =
-      `play ${Math.round(play)}m of ${Math.round(limit)}m limit`;
-    el.timeBars.appendChild(summary);
-  }
-
-  renderInsights(data.insights || []);
-}
-
-function renderInsights(insights) {
-  el.insightList.innerHTML = "";
-  if (!insights.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "nothing concluded yet — it needs a few days of watching";
-    el.insightList.appendChild(empty);
-    return;
-  }
-  for (const item of insights.slice(0, 30)) {
-    const node = document.createElement("div");
-    node.className = "insight";
-    const confidence = Math.round((item.confidence || 0) * 100);
-    node.innerHTML =
-      `<div class="insight-head"><span class="insight-topic"></span>` +
-      `<span class="insight-conf"></span>` +
-      `<button class="insight-forget" title="This is wrong — forget it">×</button></div>` +
-      `<div class="insight-body"></div>` +
-      `<div class="insight-evidence"></div>`;
-    node.querySelector(".insight-topic").textContent = item.topic;
-    node.querySelector(".insight-conf").textContent = `${confidence}%`;
-    node.querySelector(".insight-body").textContent = item.insight;
-    node.querySelector(".insight-evidence").textContent = item.evidence || "";
-    node.querySelector(".insight-forget").addEventListener("click", async () => {
-      await fetch(`/api/insight/${item.id}/forget`, { method: "POST" });
-      refreshLife();
-    });
-    el.insightList.appendChild(node);
-  }
-}
-
-async function refreshLife() {
-  try {
-    renderLife(await fetch("/api/activity").then((r) => r.json()));
-  } catch { /* link banner already reports outages */ }
-}
-
-function showBriefing(text) {
+function showBriefing(text, title = "BRIEFING") {
+  el.briefingTitle.textContent = title;
   el.briefingBody.textContent = text;
   el.briefing.classList.add("visible");
 }
-
 el.briefingClose.addEventListener("click", () =>
   el.briefing.classList.remove("visible")
 );
 
-async function refreshInbox() {
-  try {
-    renderInbox(await fetch("/api/inbox").then((r) => r.json()));
-  } catch { /* link banner already reports outages */ }
+/* ------------------------------------------------------ command palette -- */
+
+const COMMANDS = [
+  { group: "Go", name: "Today", hint: "1", run: () => showView("today") },
+  { group: "Go", name: "Mind", hint: "2", run: () => showView("mind") },
+  { group: "Go", name: "Inbox", hint: "3", run: () => showView("inbox") },
+  { group: "Go", name: "Work", hint: "4", run: () => showView("work") },
+  { group: "Go", name: "Life", hint: "5", run: () => showView("life") },
+  { group: "Go", name: "Ventures", hint: "6", run: () => showView("ventures") },
+  { group: "Go", name: "Memory", hint: "7", run: () => showView("memory") },
+  { group: "Go", name: "System", hint: "8", run: () => showView("system") },
+
+  { group: "Run", name: "Check mail now", run: async () => {
+      const r = await post("/api/email/sweep");
+      banner(r && r.ok ? `Triaged ${r.triaged}.` : (r && r.error) || "Mail not configured.");
+      refreshInbox();
+    } },
+  { group: "Run", name: "Deliver the morning briefing", run: async () => {
+      await post("/api/routine/briefing");
+      banner("Briefing running…");
+    } },
+  { group: "Run", name: "Read me the news", run: async () => {
+      await post("/api/routine/news");
+      banner("Searching the news…");
+    } },
+  { group: "Run", name: "Review money-making ideas", run: async () => {
+      await post("/api/routine/ventures");
+      banner("Venture review running…");
+    } },
+  { group: "Run", name: "Learn from what I've been doing", run: async () => {
+      banner("Reviewing…");
+      const r = await post("/api/learning/mine");
+      banner(`${(r && r.insights || []).length} insights updated.`);
+      refreshLife();
+    } },
+  { group: "Run", name: "Reflect now", run: async () => {
+      await post("/api/cognition/tick");
+      banner("Reflection pass run.");
+    } },
+  { group: "Run", name: "Check my play time", run: async () => {
+      await post("/api/routine/playtime");
+      refreshLife();
+    } },
+
+  { group: "Do", name: "Focus mode", hint: "F", run: () =>
+      setFocus(!document.body.classList.contains("focus")) },
+  { group: "Do", name: "Toggle microphone", hint: "space", run: () => el.mic.click() },
+  { group: "Do", name: "Mute the voice", run: () => el.speaker.click() },
+  { group: "Do", name: "Stop talking", hint: "esc", run: () => voice.stopSpeaking() },
+  { group: "Do", name: "Quiet for an hour", run: async () => {
+      await post("/api/nudge/snooze", { minutes: 60 });
+      banner("Quiet for an hour.");
+    } },
+  { group: "Do", name: "Clear the conversation", run: () => {
+      el.transcript.innerHTML = "";
+      banner("Cleared on screen — the memory is untouched.");
+    } },
+];
+
+let paletteMatches = [];
+let paletteIndex = 0;
+
+function openPalette() {
+  el.palette.classList.add("visible");
+  el.paletteInput.value = "";
+  el.paletteInput.focus();
+  renderPalette("");
 }
 
-async function refreshWork() {
-  try {
-    const data = await fetch("/api/work").then((r) => r.json());
-    renderWork(data);
-    renderVentures(data.ventures || []);
-  } catch { /* as above */ }
+function closePalette() {
+  el.palette.classList.remove("visible");
+  el.input.focus();
 }
+
+function renderPalette(query) {
+  const needle = query.trim().toLowerCase();
+  paletteMatches = COMMANDS.filter((c) =>
+    !needle || c.name.toLowerCase().includes(needle) || c.group.toLowerCase().includes(needle)
+  );
+
+  // Anything that isn't a command becomes a memory search, so one box does
+  // both without the user having to decide which they meant.
+  if (needle && paletteMatches.length === 0) {
+    paletteMatches = [{
+      group: "Search",
+      name: `Search memory for “${query.trim()}”`,
+      run: () => { showView("memory"); el.recallInput.value = query.trim(); runRecall(query.trim()); },
+    }, {
+      group: "Ask",
+      name: `Ask JARVIS: “${query.trim()}”`,
+      run: () => submit(query.trim()),
+    }];
+  } else if (needle) {
+    paletteMatches = paletteMatches.concat([{
+      group: "Ask",
+      name: `Ask JARVIS: “${query.trim()}”`,
+      run: () => submit(query.trim()),
+    }]);
+  }
+
+  paletteIndex = 0;
+  paintPalette();
+}
+
+function paintPalette() {
+  el.paletteList.innerHTML = "";
+  let group = null;
+  paletteMatches.forEach((command, index) => {
+    if (command.group !== group) {
+      group = command.group;
+      const header = document.createElement("div");
+      header.className = "palette-group";
+      header.textContent = group;
+      el.paletteList.appendChild(header);
+    }
+    const node = document.createElement("div");
+    node.className = `palette-item${index === paletteIndex ? " selected" : ""}`;
+    node.innerHTML = `<span class="palette-name"></span>`
+      + (command.hint ? `<span class="palette-hint">${command.hint}</span>` : "");
+    node.querySelector(".palette-name").textContent = command.name;
+    node.addEventListener("click", () => runPalette(index));
+    el.paletteList.appendChild(node);
+  });
+  el.paletteList.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+}
+
+function runPalette(index) {
+  const command = paletteMatches[index];
+  closePalette();
+  command?.run();
+}
+
+el.paletteOpen.addEventListener("click", openPalette);
+el.palette.addEventListener("click", (event) => {
+  if (event.target === el.palette) closePalette();
+});
+el.paletteInput.addEventListener("input", () => renderPalette(el.paletteInput.value));
+el.paletteInput.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    paletteIndex = Math.min(paletteIndex + 1, paletteMatches.length - 1);
+    paintPalette();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    paletteIndex = Math.max(paletteIndex - 1, 0);
+    paintPalette();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    runPalette(paletteIndex);
+  } else if (event.key === "Escape") {
+    closePalette();
+  }
+});
 
 /* ------------------------------------------------------------ voice UI -- */
 
@@ -800,8 +1245,8 @@ function populateVoices() {
 
   if (!voices.length) {
     // getVoices() populates asynchronously, so this is normal for a moment —
-    // onVoicesChanged re-runs us. If it never fires, the browser genuinely
-    // has no speech synthesis and we should say so rather than spin forever.
+    // onVoicesChanged re-runs us. If it never fires, the browser genuinely has
+    // no speech synthesis and we should say so rather than spin forever.
     const option = document.createElement("option");
     option.textContent = "loading voices…";
     el.voiceSelect.appendChild(option);
@@ -822,23 +1267,19 @@ function populateVoices() {
   }
   clearTimeout(populateVoices._timer);
 
+  const good = /Natural|Online|Enhanced|Premium|Siri|^Google/i;
   for (const item of voices) {
     const option = document.createElement("option");
     option.value = item.name;
-    // Flag the ones that actually sound good, since the list is long and
-    // the quality difference between them is enormous.
-    const good = /Natural|Online|Enhanced|Premium|Siri|^Google/i.test(item.name);
-    option.textContent = `${good ? "★ " : ""}${item.name} · ${item.lang}`;
+    // Flag the ones that actually sound good: the list is long and the
+    // quality difference between them is enormous.
+    option.textContent = `${good.test(item.name) ? "★ " : ""}${item.name} · ${item.lang}`;
     option.selected = item.selected;
     el.voiceSelect.appendChild(option);
   }
-
-  const starred = voices.filter((v) =>
-    /Natural|Online|Enhanced|Premium|Siri|^Google/i.test(v.name)
-  ).length;
-  el.voiceHint.textContent = starred
+  el.voiceHint.textContent = voices.some((v) => good.test(v.name))
     ? "★ marks the higher-quality voices. Pick one and press Test."
-    : "Only basic system voices are installed — see the README for how to add better ones.";
+    : "Only basic system voices are installed — see the README for better ones.";
 }
 
 function syncVoiceControls() {
@@ -850,148 +1291,22 @@ function syncVoiceControls() {
 
 voice.onVoicesChanged = () => populateVoices();
 
-el.voiceButton.addEventListener("click", () => {
-  const open = el.voicePanel.classList.toggle("visible");
-  if (open) {
-    populateVoices();
-    syncVoiceControls();
-  }
-});
-
-el.voiceClose.addEventListener("click", () =>
-  el.voicePanel.classList.remove("visible")
-);
-
 el.voiceSelect.addEventListener("change", () => {
   if (voice.setVoice(el.voiceSelect.value)) {
     voice.preview("Voice set. This is how I'll sound.");
   }
 });
-
-el.voiceRate.addEventListener("input", () => {
-  voice.setRate(el.voiceRate.value);
-  syncVoiceControls();
-});
+el.voiceRate.addEventListener("input", () => { voice.setRate(el.voiceRate.value); syncVoiceControls(); });
 el.voiceRate.addEventListener("change", () => voice.preview("Speed set like this."));
-
-el.voicePitch.addEventListener("input", () => {
-  voice.setPitch(el.voicePitch.value);
-  syncVoiceControls();
-});
+el.voicePitch.addEventListener("input", () => { voice.setPitch(el.voicePitch.value); syncVoiceControls(); });
 el.voicePitch.addEventListener("change", () => voice.preview("Pitch set like this."));
-
 el.voiceTest.addEventListener("click", () => voice.preview());
-
 el.voiceReset.addEventListener("click", () => {
   voice.setRate(1.04);
   voice.setPitch(0.92);
   syncVoiceControls();
   voice.preview("Reset to the default delivery.");
 });
-
-/* tabs */
-for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    for (const other of document.querySelectorAll(".tab")) {
-      other.classList.toggle("active", other === tab);
-    }
-    for (const panel of document.querySelectorAll(".tab-panel")) {
-      panel.classList.toggle("active", panel.dataset.panel === tab.dataset.tab);
-    }
-  });
-}
-
-function trimChildren(container, max) {
-  while (container.children.length > max) container.removeChild(container.firstChild);
-}
-
-function formatTokens(totals) {
-  const compact = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-  return `${compact(totals.input || 0)}↓ ${compact(totals.output || 0)}↑`
-    + (totals.cache_read ? ` ${compact(totals.cache_read)}⚡` : "");
-}
-
-/* ------------------------------------------------------------ status/API -- */
-
-function applyStatus(status) {
-  if (!status) return;
-  statusCache = status;
-  // Online means "a backend is configured"; reachable means it actually
-  // answers. A local model that was never pulled is the difference.
-  const usable = status.online && status.reachable !== false;
-  el.model.textContent = !status.online
-    ? "OFFLINE CORE"
-    : usable
-      ? status.model + (status.local ? " · local" : "")
-      : "UNREACHABLE";
-  el.model.classList.toggle("warn", !usable);
-  el.model.title = usable ? "" : (status.backend_error || "");
-  if (status.tokens) el.tokens.textContent = formatTokens(status.tokens);
-  renderVitals(status);
-}
-
-function renderVitals(status) {
-  const host = status.host || {};
-  const memory = status.memory || {};
-  const rows = [
-    ["CPU", host.cpu_percent != null ? `${host.cpu_percent}%` : "—", pct(host.cpu_percent)],
-    ["MEM", host.memory_percent != null ? `${host.memory_percent}%` : "—", pct(host.memory_percent)],
-    ["DISK", host.disk_percent != null ? `${host.disk_percent}%` : "—", pct(host.disk_percent)],
-    ["FACTS", memory.facts ?? 0, null],
-    ["EPISODES", memory.episodes ?? 0, null],
-    ["SAFE MODE", status.safe_mode ? "ON" : "OFF", null],
-  ];
-  if (host.battery_percent != null) {
-    rows.splice(3, 0, ["PWR", `${host.battery_percent}%`, pct(host.battery_percent)]);
-  }
-  el.vitals.innerHTML = "";
-  for (const [label, value, fraction] of rows) {
-    const row = document.createElement("div");
-    row.className = "vital";
-    row.innerHTML =
-      `<span class="vital-label"></span><span class="vital-value"></span>` +
-      (fraction != null ? `<span class="vital-bar"><i style="width:${fraction}%"></i></span>` : "");
-    row.querySelector(".vital-label").textContent = label;
-    row.querySelector(".vital-value").textContent = value;
-    el.vitals.appendChild(row);
-  }
-}
-
-const pct = (v) => (v == null ? null : Math.max(0, Math.min(100, v)));
-
-async function refreshStatus() {
-  try {
-    const [status, memory] = await Promise.all([
-      fetch("/api/status").then((r) => r.json()),
-      fetch("/api/memory").then((r) => r.json()),
-    ]);
-    applyStatus(status);
-    renderGoals(memory.goals || []);
-  } catch {
-    /* the websocket banner already reports link problems */
-  }
-}
-
-function renderGoals(goals) {
-  const open = goals.filter((g) => g.status === "open").slice(0, 8);
-  el.goals.innerHTML = "";
-  if (!open.length) {
-    const empty = document.createElement("div");
-    empty.className = "goal empty";
-    empty.textContent = "no active objectives";
-    el.goals.appendChild(empty);
-    return;
-  }
-  for (const goal of open) {
-    const node = document.createElement("div");
-    node.className = "goal";
-    node.innerHTML =
-      `<span class="goal-title"></span>` +
-      `<span class="goal-bar"><i style="width:${Math.round((goal.progress || 0) * 100)}%"></i></span>`;
-    node.querySelector(".goal-title").textContent = `#${goal.id} ${goal.title}`;
-    el.goals.appendChild(node);
-  }
-}
 
 /* ------------------------------------------------------------------ input -- */
 
@@ -1028,22 +1343,56 @@ el.speaker.addEventListener("click", () => {
 
 el.wake.addEventListener("change", () => {
   voice.requireWakeWord = el.wake.checked;
-  banner(
-    el.wake.checked
-      ? 'Wake word armed — say "Jarvis" before a command.'
-      : "Wake word off — everything heard is a command."
-  );
+  banner(el.wake.checked
+    ? 'Wake word armed — say "Jarvis" before a command.'
+    : "Wake word off — everything heard is a command.");
 });
 
-// Space toggles the mic when you aren't typing.
+const OPENERS = [
+  "What should I be doing right now?",
+  "Where did my time go today?",
+  "What's in my inbox that matters?",
+  "Give me a business idea that fits me.",
+];
+
+function showOpeners() {
+  el.suggestions.innerHTML = "";
+  for (const text of OPENERS) {
+    const button = document.createElement("button");
+    button.textContent = text;
+    button.addEventListener("click", () => submit(text));
+    el.suggestions.appendChild(button);
+  }
+}
+
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Space" && document.activeElement !== el.input) {
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
-    el.mic.click();
+    return el.palette.classList.contains("visible") ? closePalette() : openPalette();
   }
   if (event.key === "Escape") {
+    // One key backs out of everything, innermost first, so it is always the
+    // way out — including out of focus mode, where the rail is hidden.
+    if (el.palette.classList.contains("visible")) return closePalette();
+    if (el.briefing.classList.contains("visible")) {
+      return el.briefing.classList.remove("visible");
+    }
+    if (el.nudge.classList.contains("visible")) return hideNudge();
+    if (document.body.classList.contains("focus")) return setFocus(false);
     voice.stopSpeaking();
-    el.input.focus();
+    return el.input.focus();
+  }
+  if (typing) return;
+
+  if (event.code === "Space") {
+    event.preventDefault();
+    el.mic.click();
+  } else if (event.key.toLowerCase() === "f") {
+    setFocus(!document.body.classList.contains("focus"));
+  } else if (event.key >= "1" && event.key <= "8") {
+    showView(VIEWS[Number(event.key) - 1]);
   }
 });
 
@@ -1058,33 +1407,67 @@ function frame(now) {
 
   if (now - (frame._statsAt || 0) > 500) {
     frame._statsAt = now;
-    const stats = brain.stats();
-    el.fps.textContent = `${stats.fps} fps`;
-    el.neurons.textContent = `${stats.neurons} · ${stats.synapses}`;
+    el.fps.textContent = `${brain.stats().fps} fps`;
   }
   requestAnimationFrame(frame);
 }
 
-// Exposed for debugging and for driving the visualization by hand:
-//   __jarvis.setState("thinking", 1)   __jarvis.brain.ripple()
+/* --------------------------------------------------------------- refresh -- */
+
+const refreshToday = async () => renderToday(await api("/api/today"));
+const refreshInbox = async () => renderInbox(await api("/api/inbox"));
+const refreshWork = async () => renderWork(await api("/api/work"));
+const refreshLife = async () => renderLife(await api("/api/activity"));
+
+async function refreshStatus() {
+  applyStatus(await api("/api/status"));
+}
+
+async function refreshMemoryPanel() {
+  const data = await api("/api/memory");
+  if (data) renderGoals(data.goals || []);
+}
+
+// Only the visible panel refreshes on demand; the polling below keeps the
+// badges honest without re-rendering panels nobody is looking at.
+const REFRESHERS = {
+  today: refreshToday,
+  inbox: refreshInbox,
+  work: refreshWork,
+  ventures: refreshWork,
+  life: refreshLife,
+  memory: refreshMemoryPanel,
+  system: refreshStatus,
+  mind: () => {},
+};
+
 window.__jarvis = {
-  brain, hud, helix, voice, setState, submit,
+  brain, hud, helix, voice, setState, submit, showView, setFocus,
+  palette: openPalette,
   nudge: (text, tone = "coach") => showNudge({ text, tone, title: "JARVIS" }),
   status: () => statusCache,
 };
 
 window.addEventListener("resize", () => helix.resize());
 
+showView(activeView);
+if (store.get("focus", false)) setFocus(true);
+showOpeners();
+syncVoiceControls();
+populateVoices();
 connect();
+
 refreshStatus();
+refreshToday();
 refreshInbox();
 refreshWork();
 refreshLife();
-setInterval(refreshStatus, 6000);
-// Mail, background work and time tracking change on their own schedule, so
-// poll them independently of the conversation.
-setInterval(refreshInbox, 20000);
+refreshMemoryPanel();
+
+setInterval(refreshStatus, 8000);
+setInterval(() => { refreshToday(); refreshInbox(); }, 20000);
 setInterval(refreshWork, 15000);
 setInterval(refreshLife, 30000);
+
 requestAnimationFrame(frame);
 el.input.focus();

@@ -345,3 +345,44 @@ def test_ollama_can_be_forced_even_with_credentials_present():
 def test_the_real_config_exposes_a_backend_setting():
     # A typo here would silently route everyone to the wrong backend.
     assert Config().backend in ("auto", "anthropic", "ollama", "local")
+
+
+def test_an_unreachable_ollama_reports_itself_not_a_generator_error():
+    """The connection failure must survive the context manager unwinding.
+
+    Calling __aexit__ on an @asynccontextmanager whose __aenter__ raised
+    turns the real message into "generator didn't stop after athrow()",
+    which tells the user nothing about what to fix.
+    """
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    async def run():
+        client = _client(handler)
+        with pytest.raises(OllamaError) as caught:
+            async with client.messages.stream(
+                max_tokens=10, messages=[{"role": "user", "content": "hi"}],
+            ) as stream:
+                async for _ in stream:
+                    pass
+        assert "ollama.com" in str(caught.value)
+        assert "athrow" not in str(caught.value)
+        await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_create_surfaces_the_same_failure():
+    """The non-streaming path is what triage and reflection use."""
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    async def run():
+        client = _client(handler)
+        with pytest.raises(OllamaError, match="Cannot reach Ollama"):
+            await client.messages.create(
+                max_tokens=10, messages=[{"role": "user", "content": "hi"}]
+            )
+        await client.aclose()
+
+    asyncio.run(run())

@@ -54,10 +54,14 @@ project, key and memory alone.
 
 ### Using it
 
-Click the icon, then either talk or type.
+Click the icon, then either talk or type. Press **⌘K** (Ctrl-K) for the
+command palette — it's the front door to everything, and anything it doesn't
+recognise as a command becomes a question for JARVIS.
 
 - **Space** — toggle the microphone
-- **Escape** — cut off speech mid-sentence
+- **Escape** — back out of whatever is open; then cut off speech
+- **F** — focus mode: just the brain and the conversation
+- **1–8** — jump to a panel
 - **Wake word** — tick it and JARVIS only acts on speech that starts with
   "Jarvis"; leave it off and everything it hears is a command
 - **Drag** the brain to rotate it
@@ -181,6 +185,19 @@ stream, so the cognition panel works locally too.
 The default, `JARVIS_BACKEND=auto`, uses Claude when a key is present and
 falls back to the local model when it isn't. Start free, add a key later,
 change nothing else.
+
+**If it's still on Claude and you wanted free**, that's `auto` doing its job —
+it prefers Claude whenever it finds credentials. Force it either way:
+
+```bash
+python3 backend.py          # what is it using right now?
+python3 backend.py local    # free, on this machine
+python3 backend.py claude   # back to the API
+```
+
+That writes the setting into `.env` and restarts the core. It refuses to
+switch to a local model that isn't pulled yet, rather than leaving you with a
+core that can't think.
 
 ## Watching you work
 
@@ -412,7 +429,35 @@ entirely and always speak.
 stops talking the moment you start), and sentence-by-sentence synthesis so
 speech keeps pace with the token stream instead of waiting for the full reply.
 
-## The HUD
+## The interface
+
+The brain owns the screen. Everything else is chrome that stays out of its
+way: a slim top bar, an icon rail, one contextual dock on the right, and the
+conversation floating at the bottom.
+
+| | |
+|---|---|
+| **⌘K / Ctrl-K** | Command palette — run any routine, jump anywhere, or search memory. Anything it doesn't recognise becomes a question for JARVIS. |
+| **1–8** | Jump straight to a panel |
+| **F** | Focus mode — everything but the brain and the conversation gets out of the way |
+| **Space** | Toggle the microphone |
+| **Escape** | Backs out of whatever is innermost: palette, overlay, nudge, focus mode, then speech |
+
+Eight panels, one at a time, so each gets real room instead of five cramped
+tabs:
+
+| Panel | What's in it |
+|---|---|
+| **Today** | The dashboard: what needs a reply, where the day went, what it noticed |
+| **Mind** | Live reasoning stream and the tool trace |
+| **Inbox** | Triaged mail and drafts waiting for approval |
+| **Work** | The background queue — and a box to give it something to do |
+| **Life** | Time per category, play against your limit, everything it has concluded about you |
+| **Ventures** | The money-making pipeline |
+| **Memory** | Search everything it remembers, capture a fact, set an objective |
+| **System** | Which backend is running and what it costs, host vitals, voice settings |
+
+### The brain
 
 | Cognitive state | Look |
 |---|---|
@@ -434,7 +479,7 @@ pulses ride the edges, positioned entirely in the vertex shader.
 The whole interface palette is a CSS variable rewritten by `body[data-state]`,
 so the panels shift hue along with the core.
 
-Drag to rotate. Space toggles the mic. Escape stops speech.
+Drag to rotate.
 
 ## Configuration
 
@@ -490,7 +535,7 @@ half-work with your real accounts.
 ## Tests
 
 ```bash
-./.venv/bin/python -m pytest tests/ -q      # 179 tests, no API key needed
+./.venv/bin/python -m pytest tests/ -q      # 196 tests, no API key needed
 ```
 
 The suite covers memory retrieval and FTS injection safety, tool sandboxing,
@@ -512,6 +557,7 @@ to run it.
 jarvis/
 ├── install.py         one-time setup: autostart service + app icon
 ├── status.py          one-command health check with the fix for each failure
+├── backend.py         switch between Claude and the free local model
 ├── connect.py         email setup wizard
 ├── uninstall.py       removes both, leaves your data alone
 ├── launcher.py        what the icon runs: ensures the core is up, opens the HUD

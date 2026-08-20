@@ -224,16 +224,21 @@ class _Stream:
         prompt_tokens = 0
         completion_tokens = 0
 
-        self._ctx = self._client.http.stream(
+        context = self._client.http.stream(
             "POST", "/api/chat", json=body, timeout=httpx.Timeout(600.0, connect=10.0)
         )
         try:
-            self._response = await self._ctx.__aenter__()
-        except httpx.ConnectError as exc:
+            self._response = await context.__aenter__()
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise OllamaError(
                 f"Cannot reach Ollama at {self._client.base_url}. "
                 "Install it from https://ollama.com and make sure it is running."
             ) from exc
+        # Only adopt the context once entering it succeeded. Calling __aexit__
+        # on an @asynccontextmanager whose __aenter__ raised produces a
+        # "generator didn't stop after athrow()" RuntimeError that buries the
+        # real cause — which is the message the user actually needs.
+        self._ctx = context
 
         if self._response.status_code == 404:
             raise OllamaError(

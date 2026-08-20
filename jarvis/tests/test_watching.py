@@ -479,3 +479,25 @@ class _FakeTriage:
 async def _record(sink, text):
     sink.append(text)
     return True
+
+
+# -- replayed history ------------------------------------------------------
+
+
+def test_replayed_events_are_tagged_so_the_hud_can_tell_them_apart():
+    """An old nudge must not pop up and speak itself every time you open it.
+
+    The websocket sends recent history on connect so a reconnecting HUD isn't
+    blank. Untagged, the browser cannot distinguish that from something
+    happening now.
+    """
+    from server.events import EventBus
+
+    bus = EventBus()
+    bus.emit("nudge", text="Stand up.", tone="playtime")
+    bus.emit("state", state="idle")
+
+    history = [{**event, "replay": True} for event in bus.replay()]
+    assert all(event["replay"] for event in history)
+    # The live event itself is never mutated by being replayed.
+    assert "replay" not in bus.replay()[0]
