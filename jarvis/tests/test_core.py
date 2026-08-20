@@ -154,6 +154,26 @@ def test_tool_round_executes_and_feeds_results_back(jarvis):
     assert "tool_start" in kinds and "tool_end" in kinds and "turn_end" in kinds
 
 
+def test_outgoing_request_carries_a_valid_effort_and_thinking_config(jarvis):
+    """The request actually sent must satisfy the API's schema.
+
+    A malformed effort reaches the user as "I hit an error reaching my
+    reasoning core", so it's worth asserting on the real outgoing payload
+    rather than only on the parsed config.
+    """
+    from server.config import VALID_EFFORTS
+
+    jarvis.client = FakeClient([turn([text_block("Fine.")], "end_turn")])
+    asyncio.run(jarvis.respond("hello"))
+
+    params = jarvis.client.messages.calls[0]
+    assert params["output_config"]["effort"] in VALID_EFFORTS
+    assert params["thinking"]["type"] == "adaptive"
+    # Summarized thinking is what drives the brain visualization.
+    assert params["thinking"]["display"] == "summarized"
+    assert isinstance(params["max_tokens"], int) and params["max_tokens"] > 0
+
+
 def test_parallel_tool_calls_return_in_one_user_message(jarvis):
     """Splitting results across messages trains the model out of parallelism."""
     jarvis.client = FakeClient(
