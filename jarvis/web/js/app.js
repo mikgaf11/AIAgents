@@ -46,6 +46,17 @@ const el = {
   briefing: $("briefing"),
   briefingBody: $("briefing-body"),
   briefingClose: $("briefing-close"),
+  voiceButton: $("voice-settings"),
+  voicePanel: $("voice-panel"),
+  voiceSelect: $("voice-select"),
+  voiceRate: $("voice-rate"),
+  voiceRateValue: $("voice-rate-value"),
+  voicePitch: $("voice-pitch"),
+  voicePitchValue: $("voice-pitch-value"),
+  voiceTest: $("voice-test"),
+  voiceReset: $("voice-reset"),
+  voiceClose: $("voice-close"),
+  voiceHint: $("voice-hint"),
 };
 
 const PRIORITY_LABELS = ["noise", "low", "normal", "high", "critical"];
@@ -584,6 +595,103 @@ async function refreshWork() {
     renderVentures(data.ventures || []);
   } catch { /* as above */ }
 }
+
+/* ------------------------------------------------------------ voice UI -- */
+
+function populateVoices() {
+  const voices = voice.listVoices();
+  el.voiceSelect.innerHTML = "";
+
+  if (!voices.length) {
+    // getVoices() populates asynchronously, so this is normal for a moment —
+    // onVoicesChanged re-runs us. If it never fires, the browser genuinely
+    // has no speech synthesis and we should say so rather than spin forever.
+    const option = document.createElement("option");
+    option.textContent = "loading voices…";
+    el.voiceSelect.appendChild(option);
+    el.voiceHint.textContent = "Looking for installed voices…";
+    clearTimeout(populateVoices._timer);
+    populateVoices._timer = setTimeout(() => {
+      if (!voice.listVoices().length) {
+        el.voiceSelect.innerHTML = "";
+        const none = document.createElement("option");
+        none.textContent = "no voices available";
+        el.voiceSelect.appendChild(none);
+        el.voiceHint.textContent =
+          "This browser reports no speech voices. Chrome, Edge and Safari all "
+          + "ship them; Firefox needs system voices installed.";
+      }
+    }, 2500);
+    return;
+  }
+  clearTimeout(populateVoices._timer);
+
+  for (const item of voices) {
+    const option = document.createElement("option");
+    option.value = item.name;
+    // Flag the ones that actually sound good, since the list is long and
+    // the quality difference between them is enormous.
+    const good = /Natural|Online|Enhanced|Premium|Siri|^Google/i.test(item.name);
+    option.textContent = `${good ? "★ " : ""}${item.name} · ${item.lang}`;
+    option.selected = item.selected;
+    el.voiceSelect.appendChild(option);
+  }
+
+  const starred = voices.filter((v) =>
+    /Natural|Online|Enhanced|Premium|Siri|^Google/i.test(v.name)
+  ).length;
+  el.voiceHint.textContent = starred
+    ? "★ marks the higher-quality voices. Pick one and press Test."
+    : "Only basic system voices are installed — see the README for how to add better ones.";
+}
+
+function syncVoiceControls() {
+  el.voiceRate.value = String(voice.rate);
+  el.voicePitch.value = String(voice.pitch);
+  el.voiceRateValue.textContent = `${Number(voice.rate).toFixed(2)}×`;
+  el.voicePitchValue.textContent = Number(voice.pitch).toFixed(2);
+}
+
+voice.onVoicesChanged = () => populateVoices();
+
+el.voiceButton.addEventListener("click", () => {
+  const open = el.voicePanel.classList.toggle("visible");
+  if (open) {
+    populateVoices();
+    syncVoiceControls();
+  }
+});
+
+el.voiceClose.addEventListener("click", () =>
+  el.voicePanel.classList.remove("visible")
+);
+
+el.voiceSelect.addEventListener("change", () => {
+  if (voice.setVoice(el.voiceSelect.value)) {
+    voice.preview("Voice set. This is how I'll sound.");
+  }
+});
+
+el.voiceRate.addEventListener("input", () => {
+  voice.setRate(el.voiceRate.value);
+  syncVoiceControls();
+});
+el.voiceRate.addEventListener("change", () => voice.preview("Speed set like this."));
+
+el.voicePitch.addEventListener("input", () => {
+  voice.setPitch(el.voicePitch.value);
+  syncVoiceControls();
+});
+el.voicePitch.addEventListener("change", () => voice.preview("Pitch set like this."));
+
+el.voiceTest.addEventListener("click", () => voice.preview());
+
+el.voiceReset.addEventListener("click", () => {
+  voice.setRate(1.04);
+  voice.setPitch(0.92);
+  syncVoiceControls();
+  voice.preview("Reset to the default delivery.");
+});
 
 /* tabs */
 for (const tab of document.querySelectorAll(".tab")) {

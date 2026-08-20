@@ -70,6 +70,29 @@ the launch date?"* · *"Search the web for the latest on X and summarize it."*
 > recognition. The launcher picks a Chromium-family browser automatically if
 > you have one, whatever your system default is.
 
+### Changing the voice
+
+Click **VOICE** in the composer bar. You get every voice your system has,
+with the good ones sorted to the top and marked ★, plus speed and pitch
+sliders and a Test button. Your choice is remembered.
+
+The quality gap between voices is large, and it's worth installing a better
+one rather than settling for the default:
+
+- **Windows** — Settings → Time & Language → Speech → Add voices. The
+  "Natural" voices (Ryan, Sonia, Guy, Aria) are dramatically better than the
+  rest. Edge exposes them to JARVIS automatically.
+- **macOS** — System Settings → Accessibility → Spoken Content → System
+  Voice → Manage Voices. Download a "Premium" or "Enhanced" English voice;
+  Daniel (UK) is the closest to the film.
+- **Linux** — install `speech-dispatcher` with `espeak-ng` or, for much
+  better results, `mbrola` voices via your package manager.
+
+If you want genuinely film-grade speech, that needs a paid neural TTS
+service (ElevenLabs and similar) rather than the browser's built-in
+synthesis. Nothing in the current build calls one — say the word if you
+want that wired in.
+
 ### Running it by hand instead
 
 If you'd rather not install the autostart:

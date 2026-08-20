@@ -36,6 +36,13 @@ export class Voice {
     this._envelope = { target: 0, value: 0, wordAt: 0 };
     this._voice = null;
 
+    // Voice, speed and pitch are per-person taste, so they persist across
+    // restarts rather than resetting to whatever the browser prefers.
+    this.voiceName = localStorage.getItem("jarvis.voice.name") || "";
+    this.rate = Number(localStorage.getItem("jarvis.voice.rate")) || 1.04;
+    this.pitch = Number(localStorage.getItem("jarvis.voice.pitch")) || 0.92;
+    this.onVoicesChanged = null;
+
     this._setupSynthesis();
     this._tick();
   }
@@ -47,34 +54,88 @@ export class Voice {
     const pick = () => {
       const voices = window.speechSynthesis.getVoices();
       if (!voices.length) return;
-      // Prefer a natural-sounding English voice; these names are the
-      // high-quality ones across Chrome, Edge and Safari.
+
+      // An explicit choice always wins.
+      if (this.voiceName) {
+        const chosen = voices.find((v) => v.name === this.voiceName);
+        if (chosen) {
+          this._voice = chosen;
+          this.onVoicesChanged?.(voices);
+          return;
+        }
+      }
+
+      // Otherwise prefer the natural-sounding English voices. Matching is by
+      // substring because Windows names them things like "Microsoft Ryan
+      // Online (Natural) - English (United Kingdom)".
       const preferred = [
-        "Google UK English Male",
-        "Microsoft Guy Online",
-        "Microsoft Ryan Online",
-        "Daniel",
-        "Google UK English Female",
-        "Samantha",
+        "Ryan Online", "Guy Online", "Sonia Online", "Aria Online",
+        "Google UK English Male", "Daniel", "Arthur", "Oliver",
+        "Google UK English Female", "Samantha", "Google US English",
       ];
-      for (const name of preferred) {
-        const match = voices.find((v) => v.name === name);
-        if (match) { this._voice = match; return; }
+      for (const fragment of preferred) {
+        const match = voices.find((v) => v.name.includes(fragment));
+        if (match) {
+          this._voice = match;
+          this.onVoicesChanged?.(voices);
+          return;
+        }
       }
       this._voice = voices.find((v) => v.lang.startsWith("en")) || voices[0];
+      this.onVoicesChanged?.(voices);
     };
     pick();
     window.speechSynthesis.onvoiceschanged = pick;
   }
 
+  /** Every installed voice, best-sounding and English first. */
   listVoices() {
     if (!("speechSynthesis" in window)) return [];
-    return window.speechSynthesis.getVoices().map((v) => v.name);
+    const voices = window.speechSynthesis.getVoices();
+    const score = (v) => {
+      let points = 0;
+      if (/Natural|Online|Enhanced|Premium|Siri/i.test(v.name)) points -= 4;
+      if (/^Google/.test(v.name)) points -= 2;
+      if (v.lang.startsWith("en")) points -= 3;
+      if (v.localService) points += 1;
+      return points;
+    };
+    return [...voices]
+      .sort((a, b) => score(a) - score(b) || a.name.localeCompare(b.name))
+      .map((v) => ({
+        name: v.name,
+        lang: v.lang,
+        local: v.localService,
+        selected: this._voice ? v.name === this._voice.name : false,
+      }));
   }
 
   setVoice(name) {
     const match = window.speechSynthesis.getVoices().find((v) => v.name === name);
-    if (match) this._voice = match;
+    if (!match) return false;
+    this._voice = match;
+    this.voiceName = name;
+    localStorage.setItem("jarvis.voice.name", name);
+    return true;
+  }
+
+  setRate(rate) {
+    this.rate = Math.max(0.5, Math.min(2.0, Number(rate) || 1));
+    localStorage.setItem("jarvis.voice.rate", String(this.rate));
+  }
+
+  setPitch(pitch) {
+    this.pitch = Math.max(0.3, Math.min(2.0, Number(pitch) || 1));
+    localStorage.setItem("jarvis.voice.pitch", String(this.pitch));
+  }
+
+  /** Speak a sample, ignoring mute — this is the user asking to hear it. */
+  preview(text = "Systems nominal. All subsystems are responding normally.") {
+    const wasMuted = this.muted;
+    this.muted = false;
+    this.stopSpeaking();
+    this.speak(text);
+    this.muted = wasMuted;
   }
 
   speak(text) {
@@ -93,8 +154,8 @@ export class Voice {
 
     const utterance = new SpeechSynthesisUtterance(spoken);
     if (this._voice) utterance.voice = this._voice;
-    utterance.rate = 1.04;
-    utterance.pitch = 0.92;
+    utterance.rate = this.rate;
+    utterance.pitch = this.pitch;
     utterance.volume = 1.0;
 
     utterance.onstart = () => {

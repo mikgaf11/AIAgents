@@ -724,6 +724,86 @@ body::before {
 }
 .wake-toggle input { accent-color: var(--accent); cursor: pointer; }
 
+/* ----------------------------------------------------------- voice panel -- */
+
+.voice-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: min(430px, 100%);
+  z-index: 14;
+  padding: 12px 14px;
+  display: none;
+  flex-direction: column;
+  gap: 9px;
+  background: rgba(6, 14, 22, 0.96);
+  backdrop-filter: var(--panel-blur);
+  -webkit-backdrop-filter: var(--panel-blur);
+  border: 1px solid var(--accent-soft);
+  box-shadow: 0 0 34px rgba(0, 0, 0, 0.6);
+}
+.voice-panel.visible { display: flex; }
+
+.voice-row {
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  align-items: center;
+  gap: 9px;
+}
+.voice-row label {
+  font-size: 8.5px;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+}
+.voice-row output {
+  font-size: 10px;
+  color: var(--accent);
+  min-width: 38px;
+  text-align: right;
+}
+
+#voice-select {
+  width: 100%;
+  padding: 5px 6px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+}
+#voice-select:focus { border-color: var(--accent-soft); }
+/* The dropdown list itself renders with the OS palette, so force dark. */
+#voice-select option { background: #08131c; color: var(--text); }
+
+.voice-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.voice-actions { display: flex; gap: 6px; }
+.voice-actions button {
+  flex: 1;
+  padding: 6px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 8.5px;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.voice-actions button:hover { color: var(--accent); border-color: var(--accent-soft); }
+
+.voice-hint {
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
 /* --------------------------------------------------------------- banner -- */
 
 .banner {
