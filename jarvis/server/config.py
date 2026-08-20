@@ -7,10 +7,34 @@ sitting next to the project root). Nothing here reaches out to the network.
 from __future__ import annotations
 
 import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def parse_env_value(raw: str) -> str:
+    """Parse one .env value, honouring quotes and trailing comments.
+
+    People copy .env.example, which annotates settings with `# like this`,
+    so a naive parser hands the application `high   # low | medium | ...`
+    as the value. An inline comment must be preceded by whitespace, which
+    keeps a literal '#' inside a password (`pa#ssword`) intact.
+    """
+    value = raw.strip()
+    if value[:1] in ('"', "'"):
+        quote = value[0]
+        end = value.find(quote, 1)
+        # Anything after the closing quote is a comment.
+        return value[1:end] if end != -1 else value[1:]
+    comment = re.search(r"\s#", value)
+    if comment:
+        value = value[: comment.start()]
+    return value.strip()
 
 
 def _load_dotenv() -> None:
@@ -24,8 +48,9 @@ def _load_dotenv() -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        os.environ.setdefault(key, parse_env_value(value))
 
 
 _load_dotenv()
@@ -54,6 +79,24 @@ def _env_bool(name: str, default: bool) -> bool:
     return _env(name, "1" if default else "0").lower() in ("1", "true", "yes", "on")
 
 
+def _env_effort(name: str, default: str) -> str:
+    """Read an effort level, refusing to pass an invalid one to the API.
+
+    The API rejects anything outside the documented set with a 400, which
+    surfaces to the user as a broken assistant rather than a bad setting —
+    so a typo is corrected here, loudly, instead of at request time.
+    """
+    value = _env(name, default).strip().lower()
+    if value in VALID_EFFORTS:
+        return value
+    print(
+        f"  [config] {name}={value!r} is not a valid effort level"
+        f" ({', '.join(VALID_EFFORTS)}); using {default!r} instead.",
+        file=sys.stderr,
+    )
+    return default
+
+
 @dataclass(frozen=True)
 class Config:
     # --- identity -------------------------------------------------------
@@ -67,8 +110,8 @@ class Config:
     # A cheaper model for the background cognition loop and memory chores.
     background_model: str = _env("JARVIS_BACKGROUND_MODEL", "claude-sonnet-5")
 
-    effort: str = _env("JARVIS_EFFORT", "high")  # low|medium|high|xhigh|max
-    background_effort: str = _env("JARVIS_BACKGROUND_EFFORT", "low")
+    effort: str = _env_effort("JARVIS_EFFORT", "high")
+    background_effort: str = _env_effort("JARVIS_BACKGROUND_EFFORT", "low")
     max_tokens: int = _env_int("JARVIS_MAX_TOKENS", 32000)
     background_max_tokens: int = _env_int("JARVIS_BACKGROUND_MAX_TOKENS", 4000)
 
